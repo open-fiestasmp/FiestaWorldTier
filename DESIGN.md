@@ -77,6 +77,13 @@ affected dimension and preserve every surviving copy for manual recovery. Never
 delete the only verified copy. The local prototype tests the transfer boundary;
 it cannot prove Paper's file-handle or save-queue integration.
 
+The repository includes an OpenSSH/SFTP adapter with strict host-key checking,
+mode-checked identity files, a dedicated remote root, a single-writer lock,
+quota measurement, staged upload, read-back checksum verification, and atomic
+directory publication. Its transport has only been exercised through a local
+fake SFTP/SSH fixture. No live Luna transfer or host-key pin has been verified,
+and the adapter is not yet wired into Paper's storage path.
+
 ## Paper integration boundary
 
 Paper's chunk storage path uses a cached `RegionFileStorage` and Moonrise

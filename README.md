@@ -10,13 +10,17 @@ lock a whole region bundle, wait for pending saves, restore a cold bundle before
 opening it, and stop rather than generate a replacement if restore fails.
 
 The prototype models the durable transfer state machine and tests it against
-disposable worlds and a local object-store fixture. It never scans, copies, or
-deletes the live Fiesta world.
+disposable worlds and a local object-store fixture. It includes an optional
+OpenSSH/SFTP adapter that requires a pinned host key and a restricted-permission
+identity file; its transport tests use a local fake and have not been run against
+Luna. The project never scans, copies, or deletes the live Fiesta world.
 
 The prototype is designed to support a configurable hard quota. A sample
 deployment should cap world-region objects at 80,000,000,000 bytes and leave
-additional capacity for proxy and system data. It does not implement SSH
-transport or a Paper storage hook yet.
+additional capacity for proxy and system data. The OpenSSH/SFTP adapter is not
+yet connected to a Paper storage hook, a live region lease, or automatic
+eviction. Do not use it against a production world until those pieces and
+crash-recovery tests are complete.
 
 ## Safety requirements
 
@@ -38,13 +42,21 @@ transport or a Paper storage hook yet.
 
 ## Prototype
 
-`src/fiesta_world_tier/` contains the manifest, local fixture store, journal,
-and region bundle mover. It is intentionally not wired to Paper. Run its unit
-tests with:
+`src/fiesta_world_tier/` contains the manifest, local fixture store, pinned
+OpenSSH/SFTP store, journal, and region bundle mover. It is intentionally not
+wired to Paper. Run its unit tests with:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+The OpenSSH adapter requires Python 3.10 or later and the local `ssh` and
+`sftp` clients. Its remote account must have a pinned host key, a private key
+readable only by its owner, and permission to run `du`, `mkdir`, `chmod`,
+`test`, `rmdir`, and `rm` within a dedicated directory under that account's
+home. It does not use `sudo`. Keep the host, identity path, known-hosts path,
+and any runtime configuration outside this repository. Its tests use a fake
+transport and do not establish a connection to Luna.
 
 ## Proposed production design
 

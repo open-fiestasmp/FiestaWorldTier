@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Callable, Iterator, Mapping
+from typing import Callable, Iterator, Mapping, Protocol
 
 
 DIMENSION_ROOTS = {
@@ -81,6 +81,22 @@ class RegionBundle:
         if f"region/{self.filename}" not in found:
             raise TierError(f"terrain region is missing: {self.key.name}")
         return found
+
+
+class BundleObjectStore(Protocol):
+    max_bytes: int
+
+    def publish(self, key: RegionKey, files: Mapping[str, Path]) -> tuple[dict, str]: ...
+    def read_manifest(self, key: RegionKey) -> dict: ...
+    def manifest_hash(self, key: RegionKey) -> str: ...
+    def fetch(self, key: RegionKey, destination: Path) -> dict: ...
+    def delete(self, key: RegionKey) -> None: ...
+
+    @staticmethod
+    def _valid_member(key: RegionKey, member: str) -> bool: ...
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None: ...
 
 
 class DirectoryObjectStore:
@@ -279,13 +295,17 @@ class TierManager:
         self,
         server_root: Path,
         journal: Path,
-        store: DirectoryObjectStore,
+        store: BundleObjectStore,
         acquire_region_lease: Callable[[RegionKey], object],
+        local_free_reserve_bytes: int = 15 * 1024**3,
     ):
+        if local_free_reserve_bytes < 0:
+            raise ValueError("local_free_reserve_bytes must not be negative")
         self.server_root = server_root.resolve()
         self.journal = journal
         self.store = store
         self.acquire_region_lease = acquire_region_lease
+        self.local_free_reserve_bytes = local_free_reserve_bytes
         self._operation_lock = threading.RLock()
         self.journal.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
@@ -424,12 +444,32 @@ class TierManager:
                 expected_manifest_hash = self._stored_manifest_hash(key)
                 if expected_manifest_hash and self.store.manifest_hash(key) != expected_manifest_hash:
                     raise TierError(f"remote manifest checksum mismatch for {key.name}")
+                manifest_before = self.store.read_manifest(key)
+                files = manifest_before.get("files")
+                if not isinstance(files, dict) or not files:
+                    raise TierError(f"remote region bundle is incomplete for {key.name}")
+                required_bytes = 0
+                for member, info in files.items():
+                    if (not self.store._valid_member(key, member) or not isinstance(info, dict)
+                            or type(info.get("size")) is not int or info["size"] < 0):
+                        raise TierError(f"remote manifest has invalid bundle entry for {key.name}")
+                    required_bytes += info["size"]
+                if required_bytes <= 0:
+                    raise TierError(f"remote manifest has invalid sizes for {key.name}")
+                if shutil.disk_usage(self.server_root).free - required_bytes < self.local_free_reserve_bytes:
+                    raise TierError(f"insufficient local free space to restore {key.name} safely")
                 self._set_state(key, "RESTORING")
                 stage_root = self.server_root / ".world-tier-stage"
                 stage_root.mkdir(parents=True, exist_ok=True)
                 stage = Path(tempfile.mkdtemp(prefix="restore-", dir=stage_root))
                 try:
                     manifest = self.store.fetch(key, stage)
+                    if manifest != manifest_before:
+                        raise TierError(f"remote manifest changed during restore for {key.name}")
+                    if expected_manifest_hash and self.store.manifest_hash(key) != expected_manifest_hash:
+                        raise TierError(f"remote manifest changed during restore for {key.name}")
+                    if shutil.disk_usage(self.server_root).free < self.local_free_reserve_bytes:
+                        raise TierError(f"local free-space reserve would be breached by restoring {key.name}")
                     root = self.server_root / DIMENSION_ROOTS[key.dimension]
                     for member in sorted(manifest["files"]):
                         if not self.store._valid_member(key, member):

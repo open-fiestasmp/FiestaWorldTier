@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import os
+import json
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -28,6 +29,13 @@ class BrokenStore(DirectoryObjectStore):
         raise OSError("fixture upload interrupted")
 
 
+class MutatingManifestStore(DirectoryObjectStore):
+    def fetch(self, key, destination):
+        manifest = super().fetch(key, destination)
+        self._manifest_path(key).write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        return manifest
+
+
 class RegionTierTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -43,6 +51,7 @@ class RegionTierTests(unittest.TestCase):
             Path(self.temp.name) / "journal" / "tier.sqlite",
             self.store,
             self.lease.acquire,
+            local_free_reserve_bytes=0,
         )
         self.create_bundle()
 
@@ -111,11 +120,41 @@ class RegionTierTests(unittest.TestCase):
             Path(self.temp.name) / "tiny.sqlite",
             tiny_store,
             self.lease.acquire,
+            local_free_reserve_bytes=0,
         )
         with self.assertRaisesRegex(TierError, "quota"):
             manager.offload(self.key)
         self.assertTrue((self.root / "world/region/r.-2.5.mca").exists())
         self.assertEqual(manager.state(self.key), "LOCAL_ONLY")
+
+    def test_restore_respects_local_free_space_reserve(self):
+        manager = TierManager(
+            self.root,
+            Path(self.temp.name) / "reserve.sqlite",
+            self.store,
+            self.lease.acquire,
+            local_free_reserve_bytes=2**80,
+        )
+        manager.offload(self.key)
+        with self.assertRaisesRegex(TierError, "insufficient local free space"):
+            manager.restore(self.key)
+        self.assertEqual(manager.state(self.key), "REMOTE_ONLY")
+        self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+
+    def test_manifest_change_during_fetch_never_publishes_local_data(self):
+        store = MutatingManifestStore(Path(self.temp.name) / "mutating", max_bytes=10_000_000)
+        manager = TierManager(
+            self.root,
+            Path(self.temp.name) / "mutating.sqlite",
+            store,
+            self.lease.acquire,
+            local_free_reserve_bytes=0,
+        )
+        manager.offload(self.key)
+        with self.assertRaisesRegex(TierError, "remote manifest changed during restore"):
+            manager.restore(self.key)
+        self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+        self.assertGreater(store.usage(), 0)
 
     def test_failed_upload_keeps_local_bundle(self):
         broken = BrokenStore(Path(self.temp.name) / "broken", max_bytes=1000)
@@ -124,6 +163,7 @@ class RegionTierTests(unittest.TestCase):
             Path(self.temp.name) / "broken.sqlite",
             broken,
             self.lease.acquire,
+            local_free_reserve_bytes=0,
         )
         with self.assertRaisesRegex(OSError, "interrupted"):
             manager.offload(self.key)
