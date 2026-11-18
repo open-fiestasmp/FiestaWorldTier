@@ -87,6 +87,22 @@ after the storage decision and cannot prevent an empty region from being
 created. Therefore the current project is not a Bukkit plugin and must not be
 deployed as one.
 
+Further inspection of the Paper 1.21.11 source found a negative cache for
+missing region files. Restoration must be checked before that cache can return
+`null`; otherwise a remote-only region can be mistaken for a new region even
+after its manifest is known. The same storage class serves terrain, entity, and
+POI files, so the first restore for any of those roots must materialize the
+whole same-coordinate bundle and invalidate the relevant missing-file cache.
+
+Reads use `moonrise$readData` and later `moonrise$finishRead`; writes begin in
+`moonrise$startWrite` and finish in `moonrise$finishWrite`. Moonrise serializes
+region-file I/O by 32-by-32 region, but the existing controller task count is
+aggregate rather than a safe eviction lease for one region. Closing an LRU
+`RegionFile` handle alone is therefore insufficient: eviction must also prove
+that no chunk is loaded and that no read stream, pending save, or write task for
+that bundle remains active. A remote failure must propagate as a chunk I/O
+failure rather than become `NO_DATA`.
+
 The 1.21.11 Paper patch shows `moonrise$getRegionFileIfExists` returning a
 cached `RegionFile`, then checking `Files.exists(regionPath)` and returning
 `null` when absent. Restore must run before that missing-file return. Paper's
