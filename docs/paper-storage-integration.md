@@ -33,13 +33,14 @@ interrupted multi-file publication cannot be mistaken for a complete restore.
 ## Scope and current safety boundary
 
 This hook covers demand restore and prevents missing remote data from being
-treated as new terrain. It does **not** implement automatic eviction. A file
-lock serializes tier commands but cannot prove that Paper has unloaded every
-chunk in a region or drained all chunk reads, writes, tickets, and save tasks.
-Do not call the prototype's `TierManager.offload` against a live Paper world
-until a Paper-side per-region lease enforces those conditions. The patch has
-only been built against the isolated Paper 1.21.11 checkout; it has not been
-installed on Fiesta or exercised against a disposable Paper world yet.
+treated as new terrain. The companion Paper patch now includes a per-region
+lease that coordinates Moonrise and direct storage I/O, rejects regions with
+chunk holders or tickets, and closes cached region handles. It still does
+**not** implement automatic eviction: no caller holds the lease through remote
+upload, local removal, and journal commit. Do not call the prototype's
+`TierManager.offload` against a live Paper world. The patch has only been built
+against the isolated Paper 1.21.11 checkout; it has not been installed on Fiesta
+or exercised against a disposable Paper world yet.
 
 The integration is intentionally fail-closed. If the marker, command,
 configuration, SSH host key, remote bundle, checksum, quota, or local disk

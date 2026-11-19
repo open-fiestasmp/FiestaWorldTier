@@ -87,19 +87,21 @@ it cannot prove Paper's file-handle or save-queue integration.
 The repository includes an OpenSSH/SFTP adapter with strict host-key checking,
 mode-checked identity files, a dedicated remote root, a single-writer lock,
 quota measurement, staged upload, read-back checksum verification, and atomic
-directory publication. Its transport has only been exercised through a local
-fake SFTP/SSH fixture. No live Luna transfer or host-key pin has been verified,
-and the adapter is not yet wired into Paper's storage path.
+directory publication. Automated transport tests use a local fake; a separate
+synthetic publish/verify/fetch/delete smoke test has passed against Luna without
+using world data. The adapter is not yet called by Paper's automatic eviction
+path.
 
 ## Paper integration boundary
 
 Paper's chunk storage path uses a cached `RegionFileStorage` and Moonrise
-region-file I/O hooks. The integration needs a per-region read/write lease and
-must insert remote restoration before `RegionFileStorage` constructs or opens a
-missing local file. Bukkit chunk events do not provide this guarantee: they run
-after the storage decision and cannot prevent an empty region from being
-created. Therefore the current project is not a Bukkit plugin and must not be
-deployed as one.
+region-file I/O hooks. The companion Paper patch now provides a fair per-region
+read/write lease, checks for chunk holders and tickets before granting the
+tiering lease, closes cached terrain/entity/POI handles, and inserts remote
+restoration before `RegionFileStorage` opens a missing local file. Bukkit chunk
+events do not provide this guarantee: they run after the storage decision and
+cannot prevent an empty region from being created. The lease is an internal
+Paper seam, not a Bukkit plugin or an automatic eviction service.
 
 Further inspection of the Paper 1.21.11 source found a negative cache for
 missing region files. Restoration must be checked before that cache can return
@@ -109,12 +111,13 @@ POI files, so the first restore for any of those roots must materialize the
 whole same-coordinate bundle and invalidate the relevant missing-file cache.
 
 Reads use `moonrise$readData` and later `moonrise$finishRead`; writes begin in
-`moonrise$startWrite` and finish in `moonrise$finishWrite`. Moonrise serializes
-region-file I/O by 32-by-32 region, but the existing controller task count is
-aggregate rather than a safe eviction lease for one region. Closing an LRU
-`RegionFile` handle alone is therefore insufficient: eviction must also prove
-that no chunk is loaded and that no read stream, pending save, or write task for
-that bundle remains active. A remote failure must propagate as a chunk I/O
+`moonrise$startWrite` and finish in `moonrise$finishWrite`. The patch holds a
+shared lease for each Moonrise task and gates Paper's synchronous region read,
+scan, and write paths too. An exclusive tiering lease waits for those
+operations, checks the holder and ticket maps under their area locks, and
+closes cached region handles. A tiering caller must still hold that lease across
+upload, local removal, and durable journal publication; no automatic eviction
+caller is implemented yet. A remote failure must propagate as a chunk I/O
 failure rather than become `NO_DATA`.
 
 The 1.21.11 Paper patch shows `moonrise$getRegionFileIfExists` returning a
@@ -129,7 +132,8 @@ so those sidecars are part of the region bundle. References:
 
 1. Build against the exact Paper 1.21.11 source used by Fiesta; keep the patch
    separate from existing uncommitted Paper source changes.
-2. Exercise a copied world with real region, entity, and POI files.
+2. Exercise a copied world with real region, entity, and POI files; validate the
+   Paper tiering caller holds the lease through transfer and journal commit.
 3. Inject termination after every journal transition and every file move.
 4. Test incomplete upload, corrupted manifest, Luna disconnect, quota full,
    local disk full, concurrent load during offload, and player arrival during
