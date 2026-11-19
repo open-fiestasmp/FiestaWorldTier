@@ -9,10 +9,12 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fiesta_world_tier import OpenSSHConfig, OpenSSHObjectStore, RegionKey, TierError, TierManager
+from fiesta_world_tier.openssh_store import OpenSSHTransport
 
 
 class FakeOpenSSH:
@@ -62,6 +64,8 @@ class FakeOpenSSH:
                         total = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
                         output += f"{total}\t{value}\n"
                 elif args[0] == "test":
+                    if "--" in args:
+                        raise AssertionError("shell test builtin does not accept -- here")
                     candidate = self.path(args[-1])
                     exists = candidate.is_dir() if "-d" in args else candidate.exists()
                     return self.result(0 if exists else 1)
@@ -185,6 +189,17 @@ class OpenSSHStoreTests(unittest.TestCase):
 
         self.store.delete(self.key)
         self.assertEqual(self.store.usage(), 0)
+
+    def test_missing_remote_object_is_reported_as_absent(self):
+        self.assertFalse(self.store._exists(self.store._object_path(self.key)))
+
+    def test_sftp_uses_its_uppercase_port_option(self):
+        transport = OpenSSHTransport(self.config)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed) as run:
+            transport.run_sftp("pwd\n")
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:5], ["sftp", "-b", "-", "-P", str(self.config.port)])
 
     def test_journaled_manager_can_offload_and_restore_over_sftp_fixture(self):
         server = self.root / "world-server"

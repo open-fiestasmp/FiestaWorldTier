@@ -99,8 +99,9 @@ class OpenSSHTransport:
         return result
 
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        sftp_options = ["-P", str(self.config.port), *self.options[2:]]
         result = subprocess.run(
-            ["sftp", "-b", "-", *self.options, self.target],
+            ["sftp", "-b", "-", *sftp_options, self.target],
             input=batch,
             text=True,
             capture_output=True,
@@ -192,7 +193,7 @@ class OpenSSHObjectStore:
                 break
             if result.returncode != 1:
                 raise TierError(f"could not acquire remote writer lock (exit {result.returncode})")
-            exists = self._ssh(f"test -d -- {lock}", check=False)
+            exists = self._ssh(f"test -d {lock}", check=False)
             if exists.returncode != 0:
                 raise TierError("remote writer lock creation failed")
             if time.monotonic() >= deadline:
@@ -214,7 +215,7 @@ class OpenSSHObjectStore:
         return self._object_path(key) / "manifest.json"
 
     def _exists(self, path: PurePosixPath) -> bool:
-        result = self._ssh(f"test -e -- {shlex.quote(self._remote_path(path))}", check=False)
+        result = self._ssh(f"test -e {shlex.quote(self._remote_path(path))}", check=False)
         if result.returncode == 0:
             return True
         if result.returncode == 1:
