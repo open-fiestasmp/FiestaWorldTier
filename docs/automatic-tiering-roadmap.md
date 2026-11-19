@@ -1,11 +1,13 @@
 # Automatic hot/cold region tiering roadmap
 
 This document describes the intended hybrid storage policy. It is a design and
-implementation checklist, not a claim that automatic eviction is available.
-The companion Paper patch now supports marked demand restore, explicit leased
-offload, and region access timestamps. Python commands list age-based
-candidates and dry-run a local world-data budget plan, but there is no automatic
-storage-budget controller or scheduler.
+implementation checklist, not a claim that automatic eviction is available on
+Fiesta. The companion Paper patch supports marked demand restore, explicit
+leased offload, region access timestamps, and an opt-in idle scheduler. Python
+commands list age-based candidates and dry-run a local world-data budget plan.
+The scheduler is not installed on Fiesta; its tick dispatch and leased-API call
+were exercised on a disposable Paper server with a fake CLI shim, while the
+real remote transfer and restore path still needs end-to-end testing.
 Do not enable automatic eviction on a live world until the gates below pass on
 a disposable copy.
 
@@ -114,12 +116,17 @@ offload is not part of the initial rollout.
 - Paper demand-restore seam with fail-closed marked recovery: implemented in
   the companion Paper 1.21.11 patch; not installed on Fiesta.
 - Paper region lease and explicit offload API with cross-process lock: implemented
-  experimentally in the companion patch; no automatic policy calls it yet.
+  experimentally in the companion patch; the opt-in idle scheduler now calls it
+  one region at a time when configured.
 - Region I/O access timestamps, initial catalog, age-based candidate listing,
   and a dry-run planner for a configured local world-data target: implemented
   experimentally. The planner reads an unlocked remote-usage snapshot to cap
-  its estimate, but performs no offloads; automatic scheduling and a locked
-  quota reservation are not implemented.
+  its estimate; each actual upload rechecks quota under the remote writer lock.
+- Opt-in idle scheduler: implemented in the companion Paper patch, disabled by
+  default, and not installed on Fiesta. Its idle tick and Paper API handoff
+  passed a disposable-server test with a fake CLI; real transfer and restore
+  testing remain outstanding. It plans one cold region per pass and requires
+  the main server to be empty before starting an offload.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and

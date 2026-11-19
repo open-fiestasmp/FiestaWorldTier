@@ -26,9 +26,10 @@ marked demand restore, per-region I/O leases, and an experimental
 `offloadRegion(...)` API that holds Paper's exclusive lease while the CLI
 uploads and evicts one region. The CLI also requires proof of Paper's
 cross-process lock; Java/Python lock interoperation was verified on Linux.
-There is no automatic cold-region selector or scheduler, and this integration
-has not been exercised on a disposable server. Do not offload a production
-world until the access-age policy and integration gates below pass.
+The companion Paper patch includes an opt-in idle scheduler, but it is not
+installed on Fiesta and the complete live-storage path has not been exercised
+on a disposable server. Do not offload a production world until the access-age
+policy and integration gates below pass.
 
 ## Safety requirements
 
@@ -77,8 +78,11 @@ objects/staging usage; it constrains selection by reported quota headroom but
 does not move files. The snapshot is unlocked and can race another writer; each
 actual upload rechecks exact quota under the remote writer lock. Planning
 initializes local access metadata. Each actual offload still requires Paper's
-region lease, a healthy tracker, and an old access timestamp. No scheduler
-currently calls this API. Run the unit tests with:
+region lease, a healthy tracker, and an old access timestamp. The companion
+Paper patch includes an opt-in idle scheduler that requests one oldest bundle
+per pass and rechecks the lease before each transfer; it is not installed on
+Fiesta. Use `--max-selected 1` for a bounded one-region plan. Run the unit tests
+with:
 
 ```sh
 python3 -m unittest discover -s tests -v
