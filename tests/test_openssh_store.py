@@ -41,6 +41,16 @@ class FakeOpenSSH:
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         self.ssh_commands.append(command)
         output = ""
+        exists_match = re.fullmatch(
+            r"if \[ -L (.*?) \]; then exit 2; elif \[ -e (.*?) \]; then exit 0; else exit 1; fi",
+            command,
+        )
+        if exists_match:
+            symlink_path = self.path(shlex.split(exists_match.group(1))[0])
+            target_path = self.path(shlex.split(exists_match.group(2))[0])
+            if symlink_path.is_symlink():
+                return self.result(2, error="remote path is a symlink")
+            return self.result(0 if target_path.exists() else 1)
         if command.startswith("if [ -L "):
             checked = [shlex.split(value)[0] for value in re.findall(r"\[ -L (.*?) \]", command)]
             for remote in checked:

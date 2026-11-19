@@ -104,6 +104,92 @@ class RegionTierTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(self.lease.calls, 2)
 
+    def test_staged_offload_releases_lease_during_publish_and_finalizes_unchanged_bundle(self):
+        original = self.local_contents()
+        self.manager.record_access(self.key, when=100)
+        snapshot_id = "12345678-1234-1234-1234-123456789abc"
+        self.manager.snapshot_offload(self.key, snapshot_id, age_seconds=1)
+        snapshot_dir, _metadata, staged = self.manager._read_offload_snapshot(self.key, snapshot_id)
+        for member, path in staged.items():
+            source = RegionBundle(self.root, self.key).files()[member]
+            self.assertNotEqual(path.stat().st_ino, source.stat().st_ino)
+            self.assertEqual(path.read_bytes(), original[member])
+
+        manifest_hash = self.manager.publish_offload_snapshot(self.key, snapshot_id)
+        self.assertTrue(self.store.object_exists(self.key))
+        self.assertEqual(self.local_contents(), original)
+        self.manager.finalize_offload_snapshot(self.key, snapshot_id, manifest_hash, age_seconds=1)
+        self.assertEqual(self.manager.state(self.key), "REMOTE_ONLY")
+        self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+        self.assertFalse(snapshot_dir.exists())
+        self.assertEqual(self.store.manifest_hash(self.key), manifest_hash)
+
+    def test_staged_offload_aborts_if_region_was_accessed_during_remote_publish(self):
+        original = self.local_contents()
+        self.manager.record_access(self.key, when=100)
+        snapshot_id = "22345678-1234-1234-1234-123456789abc"
+        self.manager.snapshot_offload(self.key, snapshot_id, age_seconds=1)
+        manifest_hash = self.manager.publish_offload_snapshot(self.key, snapshot_id)
+        self.manager.record_access(self.key)
+        with self.assertRaisesRegex(TierError, "recently accessed"):
+            self.manager.finalize_offload_snapshot(self.key, snapshot_id, manifest_hash, age_seconds=1)
+        self.manager.abort_offload_snapshot(self.key, snapshot_id, manifest_hash)
+        self.assertEqual(self.local_contents(), original)
+        self.assertFalse(self.store.object_exists(self.key))
+
+    def test_staged_offload_aborts_if_local_region_changes_during_publish(self):
+        original = self.local_contents()
+        self.manager.record_access(self.key, when=100)
+        snapshot_id = "32345678-1234-1234-1234-123456789abc"
+        self.manager.snapshot_offload(self.key, snapshot_id, age_seconds=1)
+        manifest_hash = self.manager.publish_offload_snapshot(self.key, snapshot_id)
+        region = self.root / "world/region/r.-2.5.mca"
+        region.write_bytes(b"changed while uploading")
+        with self.assertRaisesRegex(TierError, "changed while its remote bundle was uploading"):
+            self.manager.finalize_offload_snapshot(self.key, snapshot_id, manifest_hash, age_seconds=1)
+        self.manager.abort_offload_snapshot(self.key, snapshot_id, manifest_hash)
+        self.assertEqual(region.read_bytes(), b"changed while uploading")
+        self.assertFalse(self.store.object_exists(self.key))
+        self.assertNotEqual(self.local_contents(), original)
+
+    def test_stale_stage_recovery_deletes_only_unmarked_remote_duplicate(self):
+        self.manager.record_access(self.key, when=100)
+        snapshot_id = "42345678-1234-1234-1234-123456789abc"
+        self.manager.snapshot_offload(self.key, snapshot_id, age_seconds=1)
+        manifest_hash = self.manager.publish_offload_snapshot(self.key, snapshot_id)
+        snapshot_dir = self.manager._offload_snapshot_dir(snapshot_id)
+        metadata_path = snapshot_dir / "snapshot.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["created_at"] = 100.0
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        metadata_path.chmod(0o600)
+
+        cleaned = self.manager.cleanup_stale_offload_snapshots(max_age_seconds=100, now=201)
+        self.assertEqual(cleaned, 1)
+        self.assertFalse(snapshot_dir.exists())
+        self.assertFalse(self.store.object_exists(self.key))
+        self.assertTrue((self.root / "world/region/r.-2.5.mca").exists())
+        self.assertEqual(len(manifest_hash), 64)
+
+    def test_stale_stage_recovery_keeps_remote_bundle_when_marker_exists(self):
+        self.manager.record_access(self.key, when=100)
+        snapshot_id = "52345678-1234-1234-1234-123456789abc"
+        self.manager.snapshot_offload(self.key, snapshot_id, age_seconds=1)
+        manifest_hash = self.manager.publish_offload_snapshot(self.key, snapshot_id)
+        snapshot_dir = self.manager._offload_snapshot_dir(snapshot_id)
+        metadata_path = snapshot_dir / "snapshot.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["created_at"] = 100.0
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        metadata_path.chmod(0o600)
+        self.manager._write_remote_marker(self.key, manifest_hash)
+
+        cleaned = self.manager.cleanup_stale_offload_snapshots(max_age_seconds=100, now=201)
+        self.assertEqual(cleaned, 1)
+        self.assertFalse(snapshot_dir.exists())
+        self.assertTrue(self.store.object_exists(self.key))
+        self.assertTrue((self.root / "world/.world-tier/remote/r.-2.5.json").exists())
+
     def test_paper_restore_can_recover_from_marker_after_journal_loss(self):
         original = self.local_contents()
         self.manager.offload(self.key)

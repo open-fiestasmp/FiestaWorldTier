@@ -9,13 +9,15 @@ The child receives an argument vector (no shell), a minimal environment, a
 bounded timeout, and a private configuration path. A failed restore propagates
 as an I/O error; it cannot silently become an empty world region.
 
-Patch `0038` also exposes the experimental
-`MoonriseRegionFileIO.offloadRegion(world, regionX, regionZ)` API. Paper checks
-the region on its main thread, closes cached terrain/entity/POI files, then
-holds the exclusive region lease while a worker runs
-`fiesta-world-tier offload`. The command refuses to proceed unless it can
-verify Paper's live cross-process file lock. This Java/Python lock handoff has
-been checked on Linux.
+Patch `0038` exposes an experimental staged
+`MoonriseRegionFileIO.offloadRegion(world, regionX, regionZ, coldAgeMillis)`
+API. Paper snapshots the full region bundle while holding a short exclusive
+region lease and cross-process file lock, releases the lease during upload,
+then reacquires it to verify access age and source identity before writing the
+remote-only marker and evicting. If a player accesses or changes the region
+during upload, it keeps the local files. Java/Python lock interoperation was
+checked on Linux. Staging needs temporary local disk space equal to the bundle
+size.
 
 Install the Python package on the Paper host so the command is available at
 `/usr/local/bin/fiesta-world-tier`. Place its configuration at
@@ -40,12 +42,14 @@ age-eligible regions and excludes configured `protected_regions`. The `plan`
 command estimates complete local bundle sizes and selects the oldest eligible
 regions until the configured `local_world_data_budget_bytes` is approached.
 It reads an unlocked, advisory snapshot of remote objects/staging usage and
-constrains the estimate by current quota headroom. It does not move files.
-Cataloging and planning persist local access metadata, but do not offload
-regions. Each actual upload rechecks exact quota under the remote writer lock.
-Set `cold_age_days` in the private JSON config; candidate selection and the
-offload command use that value, and offload rechecks age under Paper's exclusive
-lock.
+constrains the estimate by current quota headroom. It does not start a live-
+region offload. Cataloging and planning persist local access metadata, but do
+not offload regions. Each actual upload rechecks exact quota under the remote
+writer lock. Set `cold_age_days` in the private JSON config; candidate selection
+and staged offload use that value, with age checked under Paper's lease before
+and after upload. Before measuring quota, `plan` cleans abandoned staging
+records older than seven days. It removes a remote duplicate only if no
+remote-only marker exists and the full local bundle remains.
 
 The command validates the marker's dimension, coordinates, and manifest hash,
 checks the configured world root, verifies the complete downloaded bundle,
@@ -59,16 +63,20 @@ interrupted multi-file publication cannot be mistaken for a complete restore.
 ## Scope and current safety boundary
 
 This hook covers demand restore and prevents missing remote data from being
-treated as new terrain. The Paper patch includes an explicit leased offload
-API and the Python `offload` command, which requires Paper's held OS file lock
-and rechecks the configured age under that lock.
-There is an experimental access-age catalog, dry-run candidate listing, and
-dry-run local-budget planner with advisory remote quota measurement. The opt-in
-scheduler has been exercised on a disposable server, but it is not installed
-on Fiesta. Paper patch `0039` refuses offload after an access-tracking failure.
+treated as new terrain. The staged offload API uses Paper's OS lock for a short
+snapshot and finalization, while the network upload runs without the region
+lease. If a player accesses or changes a region during upload, final checks
+cancel eviction and preserve its local files. The opt-in scheduler in patch
+`0039` is disabled unless its target and interval system properties are set;
+it defaults to idle-only mode. With
+`fiesta.worldTier.schedulerAllowOnline=true`, it can try up to eight cold
+regions while other areas remain active. Paper rejects loaded or ticketed
+regions, and access-tracking failures disable offload. On a disposable Paper
+server, the scheduler's tick dispatch and invocation of the staged API were
+exercised using a fake CLI shim. The scheduler is not installed on Fiesta.
 Do not enable offloading on a live world until budget selection,
 restart/crash recovery, player movement, and concurrency behavior pass
-disposable-server tests. The patch has not been installed on Fiesta.
+disposable-server tests.
 
 ### Disposable transfer smoke test
 
@@ -88,6 +96,12 @@ not valid no-generation restore measurements. A separate real-chunk fixture
 was attempted, but Paper's access tracker marked its region during startup, so
 it could not satisfy the cold-offload precondition. A real-chunk restore test
 is still needed. All runs used isolated worlds and did not touch Fiesta data.
+
+If a process crashes during upload, local region files remain authoritative
+and the staged snapshot is retained temporarily for recovery. Seven-day cleanup
+removes an abandoned remote duplicate only when the local bundle is complete,
+the manifest exactly matches the snapshot, and there is no remote-only marker.
+If a durable marker exists, cleanup preserves the remote bundle.
 The post-optimization store-stage measurements total 7.97 seconds; the larger
 Paper callback time remains unexplained. Do not enable automatic offloading on
 Fiesta until the real-chunk path, latency, restart/crash recovery, outage

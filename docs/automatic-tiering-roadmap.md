@@ -127,12 +127,13 @@ offload is not part of the initial rollout.
   its estimate; each actual upload rechecks quota under the remote writer lock.
 - Opt-in scheduler: implemented in the companion Paper patch, disabled by
   default, and not installed on Fiesta. Online mode rejects loaded or ticketed
-  regions, but holds the exact target region's exclusive lease during transfer;
-  a player requesting that region waits for upload before its restore. The
-  scheduler's existing transfer probe used an idle server and a synthetic
-  region whose callback took 27.379 seconds and returned `null`. The online
-  path, a real-chunk cold restore, movement latency, clean byte-level post-save
-  comparison, crash recovery, and outage behavior remain unverified.
+  regions. It snapshots under a short exclusive lease, uploads without that
+  lease, then reacquires it to recheck age and source identity before eviction.
+  A player can use the local region during upload; access or changes cancel
+  eviction. The scheduler's existing restore probe used an idle server and a
+  synthetic region whose callback took 27.379 seconds and returned `null`. The
+  online path, a real-chunk cold restore, movement latency, clean byte-level
+  post-save comparison, crash recovery, and outage behavior remain unverified.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and

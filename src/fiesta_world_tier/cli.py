@@ -142,6 +142,64 @@ def offload(args: argparse.Namespace) -> None:
     manager.offload(key)
 
 
+def _snapshot_key(config: dict, dimension_key: str, region_x: int, region_z: int) -> RegionKey:
+    logical_dimension = {minecraft_key: name for name, minecraft_key in DIMENSION_KEYS.items()}.get(dimension_key)
+    if logical_dimension is None:
+        raise TierError("unsupported Minecraft dimension key")
+    if f"{logical_dimension}/r.{region_x}.{region_z}" in _protected_region_names(config):
+        raise TierError("refusing tier operation for a protected region")
+    return RegionKey(logical_dimension, region_x, region_z)
+
+
+def _cold_age_seconds(config: dict) -> float:
+    age_days = config.get("cold_age_days", 30)
+    if (not isinstance(age_days, (int, float)) or isinstance(age_days, bool)
+            or not math.isfinite(age_days) or age_days <= 0):
+        raise TierError("cold age must be a positive finite number of days")
+    return float(age_days) * 86_400
+
+
+def snapshot_offload(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    logical_dimension, dimension_root = _dimension_config(
+        config, args.dimension_key, Path(args.dimension_root)
+    )
+    key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    if key.name in _protected_region_names(config):
+        raise TierError(f"refusing offload of protected region: {key.name}")
+    if not paper_lease_is_held(dimension_root, key):
+        raise TierError("refusing to snapshot without Paper's exclusive region lease")
+    _make_manager(config).snapshot_offload(key, args.snapshot_id, _cold_age_seconds(config))
+
+
+def publish_offload_snapshot(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    key = _snapshot_key(config, args.dimension_key, args.region_x, args.region_z)
+    manifest_hash = _make_manager(config).publish_offload_snapshot(key, args.snapshot_id)
+    print(manifest_hash)
+
+
+def finalize_offload_snapshot(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    logical_dimension, dimension_root = _dimension_config(
+        config, args.dimension_key, Path(args.dimension_root)
+    )
+    key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    if key.name in _protected_region_names(config):
+        raise TierError(f"refusing offload of protected region: {key.name}")
+    if not paper_lease_is_held(dimension_root, key):
+        raise TierError("refusing finalization without Paper's exclusive region lease")
+    _make_manager(config).finalize_offload_snapshot(
+        key, args.snapshot_id, args.manifest_sha256, _cold_age_seconds(config)
+    )
+
+
+def abort_offload_snapshot(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    key = _snapshot_key(config, args.dimension_key, args.region_x, args.region_z)
+    _make_manager(config).abort_offload_snapshot(key, args.snapshot_id, args.manifest_sha256)
+
+
 def restore(args: argparse.Namespace) -> None:
     config = _private_json(Path(args.config).absolute())
     logical_dimension, dimension_root = _dimension_config(
@@ -239,6 +297,7 @@ def plan(args: argparse.Namespace) -> None:
     trust_atime = _trust_filesystem_atime(config)
     manager = _make_manager(config)
     manager.catalog_local_regions(trust_atime=trust_atime)
+    stale_snapshots_cleaned = manager.cleanup_stale_offload_snapshots()
     remote_usage_bytes = manager.store.usage_snapshot()
     remote_quota_bytes = manager.store.max_bytes
     remote_available_bytes = max(0, remote_quota_bytes - remote_usage_bytes)
@@ -270,6 +329,7 @@ def plan(args: argparse.Namespace) -> None:
         "remote_available_bytes": remote_available_bytes,
         "remote_usage_snapshot_is_advisory": True,
         "requires_paper_region_lease_before_each_offload": True,
+        "stale_offload_snapshots_cleaned": stale_snapshots_cleaned,
         "automatic_eviction_enabled": False,
     })
     print(json.dumps(result, separators=(",", ":")))
@@ -294,6 +354,46 @@ def build_parser() -> argparse.ArgumentParser:
     offload_parser.add_argument("--region-x", required=True, type=int)
     offload_parser.add_argument("--region-z", required=True, type=int)
     offload_parser.set_defaults(handler=offload)
+    snapshot_parser = subparsers.add_parser(
+        "snapshot-offload", help="copy a cold region under Paper's lease before asynchronous upload"
+    )
+    snapshot_parser.add_argument("--config", required=True)
+    snapshot_parser.add_argument("--dimension-key", required=True)
+    snapshot_parser.add_argument("--dimension-root", required=True)
+    snapshot_parser.add_argument("--region-x", required=True, type=int)
+    snapshot_parser.add_argument("--region-z", required=True, type=int)
+    snapshot_parser.add_argument("--snapshot-id", required=True)
+    snapshot_parser.set_defaults(handler=snapshot_offload)
+    publish_snapshot_parser = subparsers.add_parser(
+        "publish-offload-snapshot", help="upload a private immutable region snapshot without a Paper lease"
+    )
+    publish_snapshot_parser.add_argument("--config", required=True)
+    publish_snapshot_parser.add_argument("--dimension-key", required=True)
+    publish_snapshot_parser.add_argument("--region-x", required=True, type=int)
+    publish_snapshot_parser.add_argument("--region-z", required=True, type=int)
+    publish_snapshot_parser.add_argument("--snapshot-id", required=True)
+    publish_snapshot_parser.set_defaults(handler=publish_offload_snapshot)
+    finalize_parser = subparsers.add_parser(
+        "finalize-offload-snapshot", help="evict a staged region after rechecking Paper's lease and source files"
+    )
+    finalize_parser.add_argument("--config", required=True)
+    finalize_parser.add_argument("--dimension-key", required=True)
+    finalize_parser.add_argument("--dimension-root", required=True)
+    finalize_parser.add_argument("--region-x", required=True, type=int)
+    finalize_parser.add_argument("--region-z", required=True, type=int)
+    finalize_parser.add_argument("--snapshot-id", required=True)
+    finalize_parser.add_argument("--manifest-sha256", required=True)
+    finalize_parser.set_defaults(handler=finalize_offload_snapshot)
+    abort_parser = subparsers.add_parser(
+        "abort-offload-snapshot", help="discard an uncommitted staged transfer, preserving any marked remote region"
+    )
+    abort_parser.add_argument("--config", required=True)
+    abort_parser.add_argument("--dimension-key", required=True)
+    abort_parser.add_argument("--region-x", required=True, type=int)
+    abort_parser.add_argument("--region-z", required=True, type=int)
+    abort_parser.add_argument("--snapshot-id", required=True)
+    abort_parser.add_argument("--manifest-sha256")
+    abort_parser.set_defaults(handler=abort_offload_snapshot)
     catalog_parser = subparsers.add_parser(
         "catalog", help="record local regions and initialize access ages"
     )

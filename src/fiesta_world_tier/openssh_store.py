@@ -254,12 +254,20 @@ class OpenSSHObjectStore:
         return self._object_path(key) / "manifest.json"
 
     def _exists(self, path: PurePosixPath) -> bool:
-        result = self._ssh(f"test -e {shlex.quote(self._remote_path(path))}", check=False)
+        quoted = shlex.quote(self._remote_path(path))
+        result = self._ssh(
+            f"if [ -L {quoted} ]; then exit 2; elif [ -e {quoted} ]; then exit 0; else exit 1; fi",
+            check=False,
+        )
         if result.returncode == 0:
             return True
         if result.returncode == 1:
             return False
         raise TierError("could not query remote object state")
+
+    def object_exists(self, key: RegionKey) -> bool:
+        """Check for a region object without following symlinks."""
+        return self._exists(self._object_path(key))
 
     def usage(self) -> int:
         self._ensure_root()

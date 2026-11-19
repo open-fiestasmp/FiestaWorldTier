@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -97,6 +98,7 @@ class BundleObjectStore(Protocol):
     def read_manifest(self, key: RegionKey) -> dict: ...
     def read_manifest_with_hash(self, key: RegionKey) -> tuple[dict, str]: ...
     def manifest_hash(self, key: RegionKey) -> str: ...
+    def object_exists(self, key: RegionKey) -> bool: ...
     def fetch(
         self,
         key: RegionKey,
@@ -133,6 +135,12 @@ class DirectoryObjectStore:
 
     def _manifest_path(self, key: RegionKey) -> Path:
         return self._object_path(key) / "manifest.json"
+
+    def object_exists(self, key: RegionKey) -> bool:
+        path = self._object_path(key)
+        if path.is_symlink():
+            raise TierError(f"remote object path is a symlink: {key.name}")
+        return path.exists()
 
     @staticmethod
     def _valid_member(key: RegionKey, member: str) -> bool:
@@ -736,6 +744,352 @@ class TierManager:
         finally:
             if temporary.exists():
                 temporary.unlink()
+
+    def _offload_snapshot_dir(self, snapshot_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", snapshot_id):
+            raise TierError("offload snapshot id is invalid")
+        stage_root = self.server_root / ".world-tier-stage"
+        if stage_root.is_symlink():
+            raise TierError("world-tier staging directory is a symlink")
+        stage_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not stage_root.is_dir() or not stage_root.resolve().is_relative_to(self.server_root):
+            raise TierError("world-tier staging directory is unsafe")
+        os.chmod(stage_root, 0o700)
+        snapshot_dir = stage_root / f"offload-{snapshot_id}"
+        if snapshot_dir.is_symlink():
+            raise TierError("offload snapshot directory is a symlink")
+        return snapshot_dir
+
+    def _read_offload_snapshot(self, key: RegionKey, snapshot_id: str) -> tuple[Path, dict, dict[str, Path]]:
+        snapshot_dir = self._offload_snapshot_dir(snapshot_id)
+        metadata_path = snapshot_dir / "snapshot.json"
+        if (not snapshot_dir.is_dir() or snapshot_dir.is_symlink()
+                or not metadata_path.is_file() or metadata_path.is_symlink()
+                or metadata_path.stat().st_size > 256 * 1024
+                or os.stat(metadata_path, follow_symlinks=False).st_mode & 0o077):
+            raise TierError("offload snapshot metadata is missing or unsafe")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TierError("offload snapshot metadata is invalid") from exc
+        if (not isinstance(metadata, dict) or metadata.get("format") != 1
+                or metadata.get("snapshot_id") != snapshot_id
+                or metadata.get("dimension") != key.dimension
+                or type(metadata.get("x")) is not int or metadata["x"] != key.x
+                or type(metadata.get("z")) is not int or metadata["z"] != key.z
+                or not isinstance(metadata.get("created_at"), (int, float))
+                or not math.isfinite(metadata["created_at"])
+                or not isinstance(metadata.get("files"), dict)):
+            raise TierError("offload snapshot identity is invalid")
+        files: dict[str, Path] = {}
+        for member, entry in metadata["files"].items():
+            source = entry.get("source") if isinstance(entry, dict) else None
+            if (not self.store._valid_member(key, member) or not isinstance(source, dict)
+                    or any(type(source.get(name)) is not int for name in ("dev", "ino", "size", "mtime_ns"))
+                    or type(entry.get("size")) is not int or entry["size"] < 0
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", "")))):
+                raise TierError("offload snapshot contains an invalid file entry")
+            relative = PurePosixPath(member)
+            path = snapshot_dir.joinpath(*relative.parts)
+            if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(snapshot_dir.resolve()):
+                raise TierError("offload snapshot member is missing or unsafe")
+            info = path.stat()
+            if info.st_size != entry["size"] or self.store._hash(path) != entry["sha256"]:
+                raise TierError("offload snapshot changed after it was staged")
+            files[member] = path
+        if f"region/r.{key.x}.{key.z}.mca" not in files:
+            raise TierError("offload snapshot has no terrain region")
+        return snapshot_dir, metadata, files
+
+    def snapshot_offload(self, key: RegionKey, snapshot_id: str, age_seconds: float) -> None:
+        """Copy a region bundle under Paper's lease for an immutable upload snapshot."""
+        if not math.isfinite(age_seconds) or age_seconds <= 0:
+            raise ValueError("cold age must be a positive finite number of seconds")
+        with self._operation_lock:
+            with self.acquire_region_lease(key) as acquired:
+                if not acquired:
+                    raise TierError(f"region is busy; refusing snapshot: {key.name}")
+                marker = self._marker_path(key)
+                if marker.exists() or marker.is_symlink():
+                    raise TierError(f"region already has a remote-state marker: {key.name}")
+                last_access = self.last_access(key)
+                if last_access is None or time.time() - last_access < age_seconds:
+                    raise TierError(f"refusing snapshot because region access history is recent or unknown: {key.name}")
+                source_files = RegionBundle(self.server_root, key).files()
+                required_bytes = sum(path.stat().st_size for path in source_files.values())
+                if shutil.disk_usage(self.server_root).free - required_bytes < self.local_free_reserve_bytes:
+                    raise TierError("insufficient local free space to stage an independent region copy")
+                snapshot_dir = self._offload_snapshot_dir(snapshot_id)
+                if snapshot_dir.exists():
+                    raise TierError("offload snapshot id already exists")
+                snapshot_dir.mkdir(mode=0o700)
+                try:
+                    entries: dict[str, dict] = {}
+                    for member, source in sorted(source_files.items()):
+                        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                        before = os.fstat(source_fd)
+                        if not stat.S_ISREG(before.st_mode):
+                            os.close(source_fd)
+                            raise TierError(f"region source is not a regular file: {source}")
+                        destination = snapshot_dir.joinpath(*PurePosixPath(member).parts)
+                        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        digest = hashlib.sha256()
+                        try:
+                            with os.fdopen(source_fd, "rb") as src:
+                                destination_fd = os.open(
+                                    destination,
+                                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                                    0o600,
+                                )
+                                with os.fdopen(destination_fd, "wb") as dst:
+                                    while True:
+                                        part = src.read(1024 * 1024)
+                                        if not part:
+                                            break
+                                        digest.update(part)
+                                        dst.write(part)
+                                    dst.flush()
+                                    os.fsync(dst.fileno())
+                                after = os.fstat(src.fileno())
+                        except Exception:
+                            raise
+                        source_stat = source.stat(follow_symlinks=False)
+                        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                        path_identity = (source_stat.st_dev, source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns)
+                        if before_identity != after_identity or before_identity != path_identity:
+                            raise TierError(f"region changed while snapshotting: {source}")
+                        DirectoryObjectStore._fsync_dir(destination.parent)
+                        entries[member] = {
+                            "source": {
+                                "dev": before.st_dev,
+                                "ino": before.st_ino,
+                                "size": before.st_size,
+                                "mtime_ns": before.st_mtime_ns,
+                            },
+                            "size": before.st_size,
+                            "sha256": digest.hexdigest(),
+                        }
+                    metadata = {
+                        "format": 1,
+                        "snapshot_id": snapshot_id,
+                        "dimension": key.dimension,
+                        "x": key.x,
+                        "z": key.z,
+                        "created_at": time.time(),
+                        "files": entries,
+                    }
+                    self._write_offload_snapshot_metadata(snapshot_dir, metadata)
+                except Exception:
+                    if snapshot_dir.exists():
+                        shutil.rmtree(snapshot_dir)
+                    raise
+
+    @staticmethod
+    def _write_offload_snapshot_metadata(snapshot_dir: Path, metadata: dict) -> None:
+        metadata_path = snapshot_dir / "snapshot.json"
+        temporary = snapshot_dir / f"snapshot.json.tmp-{uuid.uuid4().hex}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(metadata, output, sort_keys=True, separators=(",", ":"))
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, metadata_path)
+            DirectoryObjectStore._fsync_dir(snapshot_dir)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def publish_offload_snapshot(self, key: RegionKey, snapshot_id: str) -> str:
+        """Upload and verify an immutable bundle without holding Paper's region lease."""
+        with self._operation_lock:
+            snapshot_dir, metadata, files = self._read_offload_snapshot(key, snapshot_id)
+            marker = self._marker_path(key)
+            if marker.exists() or marker.is_symlink():
+                raise TierError(f"region acquired a remote-state marker before snapshot publish: {key.name}")
+            local_files = RegionBundle(self.server_root, key).files()
+            if set(local_files) != set(files):
+                raise TierError(f"local bundle members changed after snapshot: {key.name}")
+
+            manifest, manifest_hash = self.store.publish(key, files)
+            if not re.fullmatch(r"[0-9a-f]{64}", manifest_hash):
+                raise TierError("remote object store returned an invalid manifest checksum")
+            metadata["published_manifest_sha256"] = manifest_hash
+            self._write_offload_snapshot_metadata(snapshot_dir, metadata)
+            return manifest_hash
+
+    def finalize_offload_snapshot(
+        self, key: RegionKey, snapshot_id: str, expected_manifest_hash: str, age_seconds: float
+    ) -> None:
+        """Evict local members only after lease reacquisition and full source verification."""
+        if (not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_hash)
+                or not math.isfinite(age_seconds) or age_seconds <= 0):
+            raise ValueError("invalid snapshot finalization policy")
+        with self._operation_lock:
+            with self.acquire_region_lease(key) as acquired:
+                if not acquired:
+                    raise TierError(f"region is busy; refusing snapshot finalization: {key.name}")
+                marker = self._marker_path(key)
+                if marker.exists() or marker.is_symlink():
+                    raise TierError(f"region already has a remote-state marker: {key.name}")
+                snapshot_dir, metadata, _snapshot_files = self._read_offload_snapshot(key, snapshot_id)
+                local_files = RegionBundle(self.server_root, key).files()
+                entries = metadata["files"]
+                if set(local_files) != set(entries):
+                    raise TierError(f"local bundle members changed after upload: {key.name}")
+                manifest, manifest_hash = self.store.read_manifest_with_hash(key)
+                if manifest_hash != expected_manifest_hash:
+                    raise TierError(f"remote manifest changed before snapshot eviction: {key.name}")
+                manifest_files = manifest.get("files")
+                if not isinstance(manifest_files, dict) or set(manifest_files) != set(entries):
+                    raise TierError(f"remote bundle members do not match the local snapshot: {key.name}")
+                for member, source in local_files.items():
+                    before = entries[member]["source"]
+                    info = source.stat()
+                    current = {"dev": info.st_dev, "ino": info.st_ino, "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+                    if current != before:
+                        raise TierError(f"region changed while its remote bundle was uploading: {source}")
+                    remote_info = manifest_files[member]
+                    snapshot_info = entries[member]
+                    if (not isinstance(remote_info, dict) or remote_info.get("size") != snapshot_info["size"]
+                            or remote_info.get("sha256") != snapshot_info["sha256"]):
+                        raise TierError(f"remote bundle does not match the staged region: {source}")
+                if metadata.get("published_manifest_sha256") != expected_manifest_hash:
+                    raise TierError("snapshot metadata does not match the published remote manifest")
+                last_access = self.last_access(key)
+                if last_access is None or time.time() - last_access < age_seconds:
+                    raise TierError(f"refusing eviction because region was recently accessed: {key.name}")
+
+                self._set_state(key, "EVICTING", manifest_hash)
+                self._write_remote_marker(key, manifest_hash)
+                for path in local_files.values():
+                    path.unlink()
+                    self.store._fsync_dir(path.parent)
+                self._set_state(key, "REMOTE_ONLY", manifest_hash)
+                shutil.rmtree(snapshot_dir)
+                self.store._fsync_dir(snapshot_dir.parent)
+
+    def abort_offload_snapshot(
+        self, key: RegionKey, snapshot_id: str, expected_manifest_hash: str | None = None
+    ) -> None:
+        """Discard a staged upload; retain remote data whenever a durable marker exists."""
+        if expected_manifest_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_hash):
+            raise ValueError("invalid snapshot manifest checksum")
+        with self._operation_lock:
+            snapshot_dir = self._offload_snapshot_dir(snapshot_id)
+            marker = self._marker_path(key)
+            if marker.exists() or marker.is_symlink():
+                if expected_manifest_hash is not None:
+                    self._read_marker_hash(key, expected_manifest_hash)
+            if snapshot_dir.is_symlink():
+                raise TierError("offload snapshot directory became a symlink")
+            if not marker.exists() and not marker.is_symlink() and snapshot_dir.is_dir():
+                try:
+                    _directory, metadata, staged_files = self._read_offload_snapshot(key, snapshot_id)
+                    local_files = RegionBundle(self.server_root, key).files()
+                except TierError:
+                    staged_files = {}
+                    metadata = {}
+                    local_files = {}
+                # No marker means local files remain authoritative. Delete a
+                # remote duplicate only when its exact manifest matches this
+                # staged snapshot and the full local bundle is still present.
+                if (staged_files and set(local_files) == set(staged_files)
+                        and self.store.object_exists(key) and self._remote_matches_snapshot(key, metadata)):
+                    _manifest, remote_hash = self.store.read_manifest_with_hash(key)
+                    if expected_manifest_hash is not None and remote_hash != expected_manifest_hash:
+                        raise TierError("remote object hash does not match the expected snapshot")
+                    self.store.delete(key, expected_manifest_hash=remote_hash)
+                    if self.state(key) in ("UPLOADING", "EVICTING"):
+                        self._set_state(key, "LOCAL_ONLY", error="aborted interrupted snapshot upload")
+            if snapshot_dir.exists():
+                shutil.rmtree(snapshot_dir)
+                self.store._fsync_dir(snapshot_dir.parent)
+
+    def _remote_matches_snapshot(self, key: RegionKey, metadata: dict) -> bool:
+        try:
+            manifest = self.store.read_manifest(key)
+        except TierError:
+            return False
+        remote_files = manifest.get("files")
+        snapshot_files = metadata.get("files")
+        if not isinstance(remote_files, dict) or not isinstance(snapshot_files, dict):
+            return False
+        if set(remote_files) != set(snapshot_files):
+            return False
+        return all(
+            isinstance(remote_files[member], dict)
+            and remote_files[member].get("size") == snapshot_files[member].get("size")
+            and remote_files[member].get("sha256") == snapshot_files[member].get("sha256")
+            for member in snapshot_files
+        )
+
+    def _read_marker_hash(self, key: RegionKey, expected_manifest_hash: str) -> str:
+        marker = self._marker_path(key)
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 4096:
+            raise TierError(f"invalid world-tier marker: {marker}")
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TierError(f"invalid world-tier marker: {marker}") from exc
+        if (not isinstance(payload, dict) or payload.get("format") != 1 or payload.get("dimension") != key.dimension
+                or payload.get("dimension_key") != DIMENSION_KEYS[key.dimension]
+                or type(payload.get("x")) is not int or payload.get("x") != key.x
+                or type(payload.get("z")) is not int or payload.get("z") != key.z
+                or payload.get("state") not in ("REMOTE_ONLY", "EVICTING", "RESTORING")
+                or payload.get("manifest_sha256") != expected_manifest_hash):
+            raise TierError(f"world-tier marker identity or checksum mismatch: {marker}")
+        return expected_manifest_hash
+
+    def cleanup_stale_offload_snapshots(
+        self, max_age_seconds: float = 7 * 86_400, now: float | None = None
+    ) -> int:
+        """Recover abandoned stages after crashes; never remove marked remote data."""
+        if not math.isfinite(max_age_seconds) or max_age_seconds <= 0:
+            raise ValueError("snapshot retention age must be positive and finite")
+        stage_root = self.server_root / ".world-tier-stage"
+        if stage_root.is_symlink():
+            raise TierError("world-tier staging directory is a symlink")
+        if not stage_root.exists():
+            return 0
+        if not stage_root.is_dir():
+            raise TierError("world-tier staging path is not a directory")
+        cutoff = (time.time() if now is None else now) - max_age_seconds
+        cleaned = 0
+        for snapshot_dir in stage_root.iterdir():
+            match = re.fullmatch(r"offload-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", snapshot_dir.name)
+            if not match:
+                continue
+            if snapshot_dir.is_symlink() or not snapshot_dir.is_dir():
+                raise TierError(f"unsafe staged offload path: {snapshot_dir}")
+            metadata_path = snapshot_dir / "snapshot.json"
+            created_at = snapshot_dir.stat().st_mtime
+            key: RegionKey | None = None
+            if metadata_path.exists() and not metadata_path.is_symlink() and metadata_path.stat().st_size <= 256 * 1024:
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if (isinstance(metadata, dict) and type(metadata.get("created_at")) in (int, float)
+                            and math.isfinite(metadata["created_at"])):
+                        created_at = float(metadata["created_at"])
+                    if (isinstance(metadata, dict) and type(metadata.get("dimension")) is str
+                            and type(metadata.get("x")) is int and type(metadata.get("z")) is int):
+                        key = RegionKey(metadata["dimension"], metadata["x"], metadata["z"])
+                except (OSError, json.JSONDecodeError, ValueError):
+                    key = None
+            if created_at > cutoff:
+                continue
+            if key is not None:
+                # abort validates the private stage and removes a remote copy
+                # only when no durable marker exists and local terrain remains.
+                self.abort_offload_snapshot(key, match.group(1))
+            elif snapshot_dir.exists():
+                shutil.rmtree(snapshot_dir)
+                DirectoryObjectStore._fsync_dir(stage_root)
+            cleaned += 1
+        return cleaned
 
     def offload(self, key: RegionKey) -> None:
         with self._operation_lock:

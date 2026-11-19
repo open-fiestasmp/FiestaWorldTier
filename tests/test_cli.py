@@ -138,15 +138,57 @@ class PaperLeaseCliTests(unittest.TestCase):
         from fiesta_world_tier.paper_lease import paper_lease_is_held
 
         self.assertFalse(paper_lease_is_held(self.world, self.key))
-        process = self._hold_paper_lease()
-        try:
-            self.assertTrue(paper_lease_is_held(self.world, self.key))
-        finally:
-            process.stdin.write("release\n")
-            process.stdin.flush()
-            process.wait(timeout=5)
-            process.stdin.close()
-            process.stdout.close()
+
+    def test_staged_snapshot_and_finalize_require_a_live_paper_region_lock(self):
+        from fiesta_world_tier.cli import build_parser, finalize_offload_snapshot, snapshot_offload
+        from fiesta_world_tier.paper_lease import paper_lease_is_held
+
+        class FakeManager:
+            snapshot_args = None
+            finalize_args = None
+
+            def snapshot_offload(self, *args):
+                self.snapshot_args = args
+
+            def finalize_offload_snapshot(self, *args):
+                self.finalize_args = args
+
+        manager = FakeManager()
+        snapshot_id = "12345678-1234-1234-1234-123456789abc"
+        snapshot_args = build_parser().parse_args([
+            "snapshot-offload", "--config", str(self.config),
+            "--dimension-key", "minecraft:overworld", "--dimension-root", str(self.world),
+            "--region-x", "-1", "--region-z", "2", "--snapshot-id", snapshot_id,
+        ])
+        with patch("fiesta_world_tier.cli._make_manager", return_value=manager):
+            with self.assertRaisesRegex(TierError, "without Paper's exclusive region lease"):
+                snapshot_offload(snapshot_args)
+            self.assertIsNone(manager.snapshot_args)
+
+            process = self._hold_paper_lease()
+            try:
+                self.assertTrue(paper_lease_is_held(self.world, self.key))
+                snapshot_offload(snapshot_args)
+                self.assertEqual(manager.snapshot_args[0], self.key)
+                self.assertEqual(manager.snapshot_args[1], snapshot_id)
+                self.assertEqual(manager.snapshot_args[2], 30 * 86_400)
+
+                finalize_args = build_parser().parse_args([
+                    "finalize-offload-snapshot", "--config", str(self.config),
+                    "--dimension-key", "minecraft:overworld", "--dimension-root", str(self.world),
+                    "--region-x", "-1", "--region-z", "2", "--snapshot-id", snapshot_id,
+                    "--manifest-sha256", "a" * 64,
+                ])
+                finalize_offload_snapshot(finalize_args)
+                self.assertEqual(manager.finalize_args[0], self.key)
+                self.assertEqual(manager.finalize_args[1], snapshot_id)
+                self.assertEqual(manager.finalize_args[2], "a" * 64)
+            finally:
+                process.stdin.write("release\n")
+                process.stdin.flush()
+                process.wait(timeout=5)
+                process.stdin.close()
+                process.stdout.close()
         self.assertFalse(paper_lease_is_held(self.world, self.key))
 
     def test_offload_cli_refuses_without_paper_lock_and_does_not_delete_local_data(self):
@@ -220,6 +262,9 @@ class PaperLeaseCliTests(unittest.TestCase):
             def catalog_local_regions(self, trust_atime=False):
                 self.catalog_calls += 1
                 self.trust_atime = trust_atime
+
+            def cleanup_stale_offload_snapshots(self):
+                return 0
                 return 1
 
             def cold_regions(self, age_seconds):
@@ -278,6 +323,9 @@ class PaperLeaseCliTests(unittest.TestCase):
             def catalog_local_regions(self, trust_atime=False):
                 self.catalog_calls += 1
                 self.trust_atime = trust_atime
+
+            def cleanup_stale_offload_snapshots(self):
+                return 0
 
             def plan_local_budget(
                 self, target_bytes, age_seconds, protected, remote_available_bytes, max_selected

@@ -56,15 +56,21 @@ Use a server-side quota as a second limit where the host supports it. A sample
 deployment caps region objects at 90,000,000,000 bytes and leaves additional
 capacity for proxy and system data. The companion Paper 1.21.11 patch provides
 marked demand restore, per-region I/O leases, and an experimental
-`offloadRegion(...)` API that holds Paper's exclusive lease while the CLI
-uploads and evicts one region. The CLI also requires proof of Paper's
-cross-process lock; Java/Python lock interoperation was verified on Linux.
+`offloadRegion(...)` API that copies a bundle under a short Paper lease, uploads
+the independent copy without the lease, then reacquires the lease to verify
+the source and evict it. The CLI requires proof of Paper's cross-process lock
+for both lease-bound phases; Java/Python lock interoperation was verified on
+Linux. Staged copies need temporary local disk space, and the planner now
+cleans abandoned stage records after seven days while preserving any marked
+remote-only bundle.
 The companion Paper patch includes an opt-in scheduler with idle-only default
 and an online mode that checks up to eight candidates against Paper's region
-lease. Online mode is not installed or tested on Fiesta. The transfer cycle has been exercised on a disposable
-Paper server; the access-age policy, player movement into cold regions, outage
-recovery, and crash/concurrency gates below still need to pass. Do not offload a
-production world until they do.
+lease. If a player enters the candidate while its snapshot uploads, the final
+lease, access-age, and source checks cancel eviction and preserve the local
+region. The staged path passes Python lifecycle tests and a Paper compile, but
+the concurrent-player Paper integration test has not passed yet. Online mode
+is not installed or tested on Fiesta. Do not offload a production world until
+the remaining disposable-server gates below pass.
 
 After the verified-fetch batching change, a separate 1,048,607-byte synthetic
 region bundle passed publish, manifest/hash read, verified fetch, and guarded
@@ -134,19 +140,24 @@ fiesta-world-tier storage --config /etc/fiesta-world-tier/config.json
 
 The budget planner selects oldest cold local bundles until the configured
 `local_world_data_budget_bytes` is approached. It reports selected bundle
-sizes, unmet amount, and a read-only advisory snapshot of Luna's current
-objects/staging usage; it constrains selection by reported quota headroom but
-does not move files. The snapshot is unlocked and can race another writer; each
-actual upload rechecks exact quota under the remote writer lock. Planning
-initializes local access metadata and reports whether verified filesystem
-atime was trusted. Each actual offload still requires Paper's
+sizes, unmet amount, and an advisory snapshot of Luna's current
+objects/staging usage; it constrains its candidate plan by reported quota
+headroom but does not start a live-region offload. Before measuring quota it
+removes offload stages older than seven days, deleting a matching remote
+duplicate only when no remote-only marker exists and the complete local bundle
+remains. The snapshot is unlocked and can race another writer; each actual
+upload rechecks exact quota under the remote writer lock. Planning initializes local access
+metadata and reports whether verified filesystem atime was trusted. Each
+actual offload still requires Paper's
 region lease, a healthy tracker, and an old access timestamp. The companion
 Paper patch includes an opt-in scheduler that can try multiple candidates per
 pass; online mode is gated by a JVM property and rechecks Paper's lease before
-each transfer. A player requesting the exact region being uploaded waits for
-the upload and then uses demand restore, so player-facing latency remains an
-open test. It is not installed on Fiesta. Use `--max-selected 1` for a bounded
-one-region plan. Run the unit tests
+each transfer. The staged path copies the bundle during a lease, releases the
+lease for network upload, then rechecks cold age and file identity under a new
+lease. A player can use that region during upload; if it changed or was
+accessed, eviction is canceled. Player-facing latency still needs a Paper
+integration measurement. The scheduler is not installed on Fiesta. Use
+`--max-selected 1` for a bounded one-region plan. Run the unit tests
 with:
 
 `storage` reports the apparent size of Oracle's three world directories, Luna's
@@ -175,8 +186,6 @@ operation.
 See [DESIGN.md](DESIGN.md), the
 [automatic hot/cold tiering roadmap](docs/automatic-tiering-roadmap.md), and
 the companion [Paper storage integration notes](docs/paper-storage-integration.md).
-The next milestone is a disposable integration server, access-age tracking, and
-an automatic tiering policy that uses the Paper API. No files from production
-should be offloaded until crash recovery, concurrent reads/writes, player
-movement into a cold region, remote outage, quota exhaustion, and rollback all
-pass on copies.
+No files from production should be offloaded until crash recovery, concurrent
+reads/writes, player movement during upload, remote outage, quota exhaustion,
+and rollback all pass on disposable copies.
