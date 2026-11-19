@@ -90,7 +90,7 @@ latency gate remains open.
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
 Use a server-side quota as a second limit where the host supports it. A sample
-deployment caps region objects at 90,000,000,000 bytes and leaves additional
+deployment caps region objects at 80,000,000,000 bytes and leaves additional
 capacity for proxy and system data. The companion Paper 1.21.11 patch provides
 marked demand restore, per-region I/O leases, and an experimental
 `offloadRegion(...)` API that copies a bundle under a short Paper lease, uploads

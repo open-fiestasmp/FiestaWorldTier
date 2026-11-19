@@ -39,7 +39,7 @@ this tier.
   pre-generation and tier operations; do not delete files to recover space.
 - Luna is a remote cold store and optional proxy host. Its use is capped by a
   configurable application quota; the Fiesta deployment target is at most
-  90,000,000,000 bytes for region objects, within the requested 80–100 GB
+  80,000,000,000 bytes for region objects, within the requested 80–100 GB
   ceiling. Leave capacity for Luna's other services and filesystem overhead.
   Enforce an OS quota too when the host supports it.
 - Track used bytes from published manifests and reconcile that number against
