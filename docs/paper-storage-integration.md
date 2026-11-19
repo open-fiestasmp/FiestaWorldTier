@@ -39,10 +39,13 @@ local regions as hot if no trustworthy history exists; `candidates` reports
 age-eligible regions and excludes configured `protected_regions`. The `plan`
 command estimates complete local bundle sizes and selects the oldest eligible
 regions until the configured `local_world_data_budget_bytes` is approached.
-It does not move files or measure remote quota. Cataloging and planning do
-persist local access metadata, but do not offload regions. Set `cold_age_days`
-in the private JSON config; candidate selection and the offload command use
-that value, and offload rechecks age under Paper's exclusive lock.
+It reads an unlocked, advisory snapshot of remote objects/staging usage and
+constrains the estimate by current quota headroom. It does not move files.
+Cataloging and planning persist local access metadata, but do not offload
+regions. Each actual upload rechecks exact quota under the remote writer lock.
+Set `cold_age_days` in the private JSON config; candidate selection and the
+offload command use that value, and offload rechecks age under Paper's exclusive
+lock.
 
 The command validates the marker's dimension, coordinates, and manifest hash,
 checks the configured world root, verifies the complete downloaded bundle,
@@ -60,8 +63,8 @@ treated as new terrain. The Paper patch includes an explicit leased offload
 API and the Python `offload` command, which requires Paper's held OS file lock
 and rechecks the configured age under that lock.
 There is an experimental access-age catalog, dry-run candidate listing, and
-dry-run local-budget planner, but no remote-headroom-aware controller or
-automatic scheduler, and no production caller invokes the API. Paper patch
+dry-run local-budget planner with advisory remote quota measurement, but no
+automatic scheduler or production caller invokes the API. Paper patch
 `0039` refuses offload after an access-tracking failure. Do not enable
 offloading on a live world until budget selection, restart/crash recovery, and
 concurrency behavior pass disposable-server tests. The patch has not been

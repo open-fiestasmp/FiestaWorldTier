@@ -155,8 +155,26 @@ class RegionTierTests(unittest.TestCase):
 
         self.assertEqual(plan["current_bytes"], total_size)
         self.assertEqual(plan["planned_bytes"], old_size)
+        self.assertGreater(plan["planned_remote_bytes"], plan["planned_bytes"])
         self.assertEqual(plan["unmet_bytes"], 0)
         self.assertEqual([item["key"] for item in plan["selected"]], [self.key])
+
+    def test_budget_plan_respects_measured_remote_headroom(self):
+        self.manager.record_access(self.key, when=100)
+        remote_size = self.manager.local_region_remote_size(self.key)
+
+        blocked = self.manager.plan_local_budget(
+            0, age_seconds=100, now=1000, remote_available_bytes=remote_size - 1
+        )
+        self.assertEqual(blocked["selected"], [])
+        self.assertEqual(blocked["planned_remote_bytes"], 0)
+        self.assertEqual(blocked["unmet_bytes"], blocked["current_bytes"])
+
+        fitting = self.manager.plan_local_budget(
+            0, age_seconds=100, now=1000, remote_available_bytes=remote_size
+        )
+        self.assertEqual([item["key"] for item in fitting["selected"]], [self.key])
+        self.assertEqual(fitting["planned_remote_bytes"], remote_size)
 
     def test_budget_plan_leaves_target_unmet_when_only_region_is_hot_or_protected(self):
         size = self.manager.local_region_size(self.key)

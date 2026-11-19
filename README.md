@@ -72,10 +72,13 @@ fiesta-world-tier plan --config /etc/fiesta-world-tier/config.json
 
 The budget planner selects oldest cold local bundles until the configured
 `local_world_data_budget_bytes` is approached. It reports selected bundle
-sizes and any unmet amount; it does not move files or measure remaining Luna
-quota. Planning initializes local access metadata. Each actual offload still
-requires Paper's region lease, a healthy tracker, an old access timestamp, and
-available remote quota. No scheduler currently calls this API. Run the unit tests with:
+sizes, unmet amount, and a read-only advisory snapshot of Luna's current
+objects/staging usage; it constrains selection by reported quota headroom but
+does not move files. The snapshot is unlocked and can race another writer; each
+actual upload rechecks exact quota under the remote writer lock. Planning
+initializes local access metadata. Each actual offload still requires Paper's
+region lease, a healthy tracker, and an old access timestamp. No scheduler
+currently calls this API. Run the unit tests with:
 
 ```sh
 python3 -m unittest discover -s tests -v

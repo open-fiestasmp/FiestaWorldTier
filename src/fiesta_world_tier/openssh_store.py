@@ -247,6 +247,30 @@ class OpenSSHObjectStore:
         with self._lock, self._remote_writer_lock():
             return self._usage_unlocked()
 
+    def usage_snapshot(self) -> int:
+        """Read objects and staging usage without creating or changing remote paths.
+
+        This is an advisory, unlocked snapshot for planning. Every publish
+        still rechecks quota while holding the remote writer lock.
+        """
+        root = shlex.quote(str(self.root))
+        checks = [
+            f"if [ -L {root} ]; then exit 2; fi; "
+            f"if [ -e {root} ] && [ ! -d {root} ]; then exit 3; fi"
+        ]
+        for path in (self.objects, self.staging):
+            quoted = shlex.quote(str(path))
+            checks.append(
+                f"if [ -L {quoted} ]; then exit 2; "
+                f"elif [ -d {quoted} ]; then du -sb -- {quoted}; "
+                f"elif [ -e {quoted} ]; then exit 3; fi"
+            )
+        result = self._ssh("; ".join(checks))
+        try:
+            return sum(int(line.split(maxsplit=1)[0]) for line in result.stdout.splitlines())
+        except (IndexError, ValueError) as exc:
+            raise TierError("remote storage usage response is invalid") from exc
+
     def _usage_unlocked(self) -> int:
         result = self._ssh(
             "du -sb -- " + shlex.quote(str(self.objects)) + " " + shlex.quote(str(self.staging))

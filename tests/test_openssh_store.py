@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fiesta_world_tier import OpenSSHConfig, OpenSSHObjectStore, RegionKey, TierError, TierManager
 from fiesta_world_tier.openssh_store import OpenSSHTransport
+from fiesta_world_tier.store import RegionBundle
 
 
 class FakeOpenSSH:
@@ -36,6 +38,24 @@ class FakeOpenSSH:
 
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         output = ""
+        if command.startswith("if [ -L "):
+            checked = [shlex.split(value)[0] for value in re.findall(r"\[ -L (.*?) \]", command)]
+            for remote in checked:
+                path = self.path(remote)
+                if path.is_symlink():
+                    return self.result(2, error="remote storage path is a symlink")
+                if path.exists() and not path.is_dir():
+                    return self.result(3, error="remote storage path is not a directory")
+            measured = re.findall(r"elif \[ -d (.*?) \]; then du -sb -- (.*?)\;", command)
+            for checked_path, measured_path in measured:
+                remote = shlex.split(measured_path)[0]
+                if remote != shlex.split(checked_path)[0]:
+                    raise AssertionError("usage check and measurement paths differ")
+                path = self.path(remote)
+                if path.is_dir():
+                    total = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+                    output += f"{total}\t{remote}\n"
+            return self.result(0, output=output)
         try:
             for part in command.split(" && "):
                 args = shlex.split(part)
@@ -191,6 +211,45 @@ class OpenSSHStoreTests(unittest.TestCase):
 
         self.store.delete(self.key)
         self.assertEqual(self.store.usage(), 0)
+
+    def test_usage_snapshot_is_advisory_and_does_not_create_remote_directories(self):
+        self.assertEqual(self.store.usage_snapshot(), 0)
+        self.assertFalse(self.transport.path(str(self.store.objects)).exists())
+        self.assertFalse(self.transport.path(str(self.store.staging)).exists())
+
+        files = self.create_bundle()
+        self.store.publish(self.key, files)
+        expected = self.store.usage()
+        self.assertEqual(self.store.usage_snapshot(), expected)
+
+    def test_usage_snapshot_rejects_a_symlinked_remote_root(self):
+        remote_root = self.transport.path(str(self.store.root))
+        remote_root.parent.mkdir(parents=True, exist_ok=True)
+        remote_root.symlink_to(self.root)
+        with self.assertRaisesRegex(TierError, "remote SSH operation failed"):
+            self.store.usage_snapshot()
+
+    def test_local_remote_size_matches_published_bundle_and_manifest(self):
+        server = self.root / "size-server"
+        for member, content in self.create_bundle().items():
+            relative = Path(member)
+            destination = server / "world" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content.read_bytes())
+
+        @contextmanager
+        def lease(_key):
+            yield True
+
+        manager = TierManager(server, self.root / "size.sqlite", self.store, lease)
+        local_files = RegionBundle(server, self.key).files()
+        expected_size = manager.local_region_remote_size(self.key)
+        generation, _digest = self.store.publish(self.key, local_files)
+        manifest, encoded = self.store._manifest(self.key)
+        actual_size = sum(info["size"] for info in manifest["files"].values()) + len(encoded)
+        self.assertEqual(generation, manifest)
+        self.assertEqual(expected_size, actual_size)
+        self.store.delete(self.key)
 
     def test_missing_remote_object_is_reported_as_absent(self):
         self.assertFalse(self.store._exists(self.store._object_path(self.key)))

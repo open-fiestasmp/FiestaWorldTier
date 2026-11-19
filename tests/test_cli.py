@@ -264,12 +264,16 @@ class PaperLeaseCliTests(unittest.TestCase):
             def __init__(self):
                 self.catalog_calls = 0
                 self.arguments = None
+                self.store = type("FakeStore", (), {
+                    "max_bytes": 10_000,
+                    "usage_snapshot": lambda _self: 250,
+                })()
 
             def catalog_local_regions(self):
                 self.catalog_calls += 1
 
-            def plan_local_budget(self, target_bytes, age_seconds, protected):
-                self.arguments = (target_bytes, age_seconds, protected)
+            def plan_local_budget(self, target_bytes, age_seconds, protected, remote_available_bytes):
+                self.arguments = (target_bytes, age_seconds, protected, remote_available_bytes)
                 return {
                     "current_bytes": 2048,
                     "target_bytes": target_bytes,
@@ -279,6 +283,7 @@ class PaperLeaseCliTests(unittest.TestCase):
                     "selected": [{
                         "key": RegionKey("overworld", -1, 2),
                         "bytes": 1500,
+                        "remote_bytes": 1600,
                         "last_access": 100.0,
                     }],
                 }
@@ -294,17 +299,21 @@ class PaperLeaseCliTests(unittest.TestCase):
 
         payload = json.loads(output.getvalue())
         self.assertEqual(manager.catalog_calls, 1)
-        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set()))
+        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set(), 9750))
         self.assertEqual(payload["selected"], [{
             "dimension": "overworld",
             "region_x": -1,
             "region_z": 2,
             "bytes": 1500,
+            "remote_bytes": 1600,
             "last_access": 100.0,
         }])
         self.assertEqual(payload["mode"], "dry-run")
         self.assertFalse(payload["automatic_eviction_enabled"])
         self.assertTrue(payload["requires_paper_region_lease_before_each_offload"])
+        self.assertEqual(payload["remote_usage_bytes"], 250)
+        self.assertEqual(payload["remote_available_bytes"], 9750)
+        self.assertTrue(payload["remote_usage_snapshot_is_advisory"])
 
 
 if __name__ == "__main__":

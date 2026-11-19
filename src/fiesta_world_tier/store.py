@@ -507,22 +507,47 @@ class TierManager:
         """Return the complete local bundle size, including external .mcc files."""
         return sum(path.stat().st_size for path in RegionBundle(self.server_root, key).files().values())
 
+    def local_region_remote_size(self, key: RegionKey) -> int:
+        """Estimate exact published bytes, including the deterministic manifest."""
+        files = RegionBundle(self.server_root, key).files()
+        manifest_files = {
+            member: {
+                "name": path.name,
+                "size": path.stat().st_size,
+                # Every published SHA-256 digest has this fixed encoded length.
+                "sha256": "0" * 64,
+            }
+            for member, path in sorted(files.items())
+        }
+        manifest = {
+            "format": 1,
+            "region": {"dimension": key.dimension, "x": key.x, "z": key.z},
+            "files": manifest_files,
+        }
+        encoded_size = len(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")) + 1
+        return sum(info["size"] for info in manifest_files.values()) + encoded_size
+
     def plan_local_budget(
         self,
         target_bytes: int,
         age_seconds: float,
         protected_regions: set[str] | None = None,
         now: float | None = None,
+        remote_available_bytes: int | None = None,
     ) -> dict:
         """Choose oldest cold local bundles needed to meet a dry-run size target."""
         if type(target_bytes) is not int or target_bytes < 0:
             raise ValueError("local world-data target must be a non-negative integer")
+        if (remote_available_bytes is not None
+                and (type(remote_available_bytes) is not int or remote_available_bytes < 0)):
+            raise ValueError("remote available quota must be a non-negative integer")
         local_sizes = {key: self.local_region_size(key) for key in self.local_regions()}
         current_bytes = sum(local_sizes.values())
         needed_bytes = max(0, current_bytes - target_bytes)
         protected = protected_regions or set()
         selected: list[dict] = []
         planned_bytes = 0
+        planned_remote_bytes = 0
         if needed_bytes:
             for key in self.cold_regions(age_seconds, now):
                 size = local_sizes.get(key)
@@ -531,8 +556,18 @@ class TierManager:
                 last_access = self.last_access(key)
                 if last_access is None:
                     continue
-                selected.append({"key": key, "bytes": size, "last_access": last_access})
+                remote_size = self.local_region_remote_size(key)
+                if (remote_available_bytes is not None
+                        and planned_remote_bytes + remote_size > remote_available_bytes):
+                    continue
+                selected.append({
+                    "key": key,
+                    "bytes": size,
+                    "remote_bytes": remote_size,
+                    "last_access": last_access,
+                })
                 planned_bytes += size
+                planned_remote_bytes += remote_size
                 if planned_bytes >= needed_bytes:
                     break
         return {
@@ -540,6 +575,8 @@ class TierManager:
             "target_bytes": target_bytes,
             "needed_bytes": needed_bytes,
             "planned_bytes": planned_bytes,
+            "planned_remote_bytes": planned_remote_bytes,
+            "remote_available_bytes": remote_available_bytes,
             "unmet_bytes": max(0, needed_bytes - planned_bytes),
             "selected": selected,
         }

@@ -117,8 +117,9 @@ offload is not part of the initial rollout.
   experimentally in the companion patch; no automatic policy calls it yet.
 - Region I/O access timestamps, initial catalog, age-based candidate listing,
   and a dry-run planner for a configured local world-data target: implemented
-  experimentally. The planner does not measure remote headroom or perform
-  offloads; automatic scheduling is not implemented.
+  experimentally. The planner reads an unlocked remote-usage snapshot to cap
+  its estimate, but performs no offloads; automatic scheduling and a locked
+  quota reservation are not implemented.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and
