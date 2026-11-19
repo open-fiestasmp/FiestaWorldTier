@@ -12,12 +12,15 @@ opening it, and stop rather than generate a replacement if restore fails.
 The prototype models the durable transfer state machine and tests it against
 disposable worlds and a local object-store fixture. It includes an optional
 OpenSSH/SFTP adapter that requires a pinned host key and a restricted-permission
-identity file. Automated transport tests use a local fake. Synthetic transfer
-tests and a disposable Paper 1.21.11 offload-and-demand-restore smoke test have
-also passed against Luna without using world data. That Paper test exposed a
-long wait (about 27 seconds) for a forced load from cold storage, so restore
-latency and player-movement behavior still need more testing. The project never
-scans, copies, or deletes the live Fiesta world.
+identity file. Automated transport tests use a local fake. After the batched
+transport change, a disposable Paper 1.21.11 server restored a synthetic
+spawn-region bundle from Luna on a forced chunk load. The restored region
+SHA-256 matched the original, the durable marker cleared, and the remote test
+object was consumed; the unique test root was then removed. This test used an
+isolated world and did not touch Fiesta world data. Player-facing restore
+latency, outage recovery, concurrent player movement, and production-scale
+transfers still need testing. The project never scans, copies, or deletes the
+live Fiesta world.
 
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
@@ -38,12 +41,12 @@ After the verified-fetch batching change, a separate 1,048,607-byte synthetic
 region bundle passed publish, manifest/hash read, verified fetch, and guarded
 delete against Luna with SSH multiplexing enabled. Measured times were 26.6 s,
 3.1 s, 9.4 s, and 9.0 s respectively; the unique remote test directory was
-removed and usage returned to zero. One earlier multiplexed store attempt timed
-out, while a repeat completed, so the transport still needs retry and outage
-testing. This was a storage-adapter test, not a repeat of the Paper demand-load
-test: the earlier disposable Paper restore took about 27 seconds and triggered
-watchdog dumps. Repeating that Paper path after the batching change remains an
-open requirement.
+removed and usage returned to zero. A later disposable Paper 1.21.11 forced
+chunk-load test exercised the patched restore hook with a synthetic spawn
+region; its checksum matched, the marker cleared, and the unique remote root was
+removed. One earlier multiplexed store attempt timed out while later complete
+transfers passed, so retry and outage behavior still need testing. Player-facing
+restore latency remains an open requirement.
 
 ## Safety requirements
 
