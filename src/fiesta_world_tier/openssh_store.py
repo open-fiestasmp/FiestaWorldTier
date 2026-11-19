@@ -19,6 +19,14 @@ from typing import Iterator, Mapping, Protocol
 from .store import DirectoryObjectStore, RegionKey, TierError
 
 
+class TransientSFTPError(TierError):
+    """An SFTP batch failed because its SSH transport timed out or disconnected."""
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class OpenSSHConfig:
     """Connection details for a dedicated SFTP object root.
@@ -120,14 +128,21 @@ class OpenSSHTransport:
 
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
         sftp_options = ["-P", str(self.config.port), *self.options[2:]]
-        result = subprocess.run(
-            ["sftp", "-b", "-", *sftp_options, self.target],
-            input=batch,
-            text=True,
-            capture_output=True,
-            timeout=self.config.timeout_seconds,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["sftp", "-b", "-", *sftp_options, self.target],
+                input=batch,
+                text=True,
+                capture_output=True,
+                timeout=self.config.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TransientSFTPError("SFTP operation timed out", retryable=False) from exc
+        except OSError as exc:
+            raise TransientSFTPError("SFTP process could not complete", retryable=False) from exc
+        if result.returncode == 255:
+            raise TransientSFTPError("SFTP SSH transport disconnected")
         if result.returncode != 0:
             raise TierError(f"SFTP operation failed (exit {result.returncode})")
         return result
@@ -193,8 +208,12 @@ class OpenSSHObjectStore:
     def _sftp(self, lines: list[str]) -> None:
         try:
             result = self.transport.run_sftp("\n".join(lines) + "\n")
+        except TransientSFTPError:
+            raise
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise TierError("SFTP connection failed") from exc
+            raise TransientSFTPError("SFTP connection failed", retryable=False) from exc
+        if result.returncode == 255:
+            raise TransientSFTPError("SFTP SSH transport disconnected")
         if result.returncode != 0:
             raise TierError(f"SFTP operation failed (exit {result.returncode})")
 
@@ -450,37 +469,76 @@ class OpenSSHObjectStore:
         expected_manifest_hash: str,
     ) -> dict:
         self._validate_manifest(key, manifest)
+        if destination.is_symlink():
+            raise TierError(f"restore destination is a symlink: {destination}")
         destination.mkdir(parents=True, exist_ok=True)
+        destination = destination.resolve(strict=True)
         object_path = self._object_path(key)
-        batch: list[str] = []
-        targets: list[tuple[str, dict, Path]] = []
-        with tempfile.TemporaryDirectory(prefix="fiesta-tier-fetch-manifest-") as temporary:
-            manifest_after = Path(temporary) / "manifest.json"
-            for member, info in sorted(manifest["files"].items()):
-                relative = PurePosixPath(member)
-                target = destination.joinpath(*relative.parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                batch.append(f"get {self._sftp_quote(object_path / relative)} {self._sftp_quote(target)}")
-                targets.append((member, info, target))
-            batch.append(
-                f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(manifest_after)}"
-            )
-            self._sftp(batch)
-            try:
-                encoded_after = manifest_after.read_bytes()
-                after = json.loads(encoded_after)
-            except (OSError, json.JSONDecodeError) as exc:
-                raise TierError(f"remote manifest changed during restore for {key.name}") from exc
-            if (hashlib.sha256(encoded_after).hexdigest() != expected_manifest_hash
-                    or after != manifest):
-                raise TierError(f"remote manifest changed during restore for {key.name}")
-        for member, info, target in targets:
-            if target.is_symlink() or not target.is_file():
-                raise TierError(f"downloaded bundle member is not a regular file: {member}")
-            if target.stat().st_size != int(info["size"]) or self._hash(target) != info["sha256"]:
-                raise TierError(f"download verification failed: {member}")
-            with target.open("rb") as file:
-                os.fsync(file.fileno())
+        members = sorted(manifest["files"].items())
+        final_targets: list[tuple[str, dict, Path]] = []
+        for member, info in members:
+            relative = PurePosixPath(member)
+            target = destination.joinpath(*relative.parts)
+            parent = target.parent
+            if parent.is_symlink() or target.is_symlink():
+                raise TierError(f"restore destination contains a symlink: {member}")
+            if target.exists():
+                raise TierError(f"restore destination already contains a file: {member}")
+            final_targets.append((member, info, target))
+
+        last_transient_error: TransientSFTPError | None = None
+        for attempt in range(2):
+            with tempfile.TemporaryDirectory(prefix=".fiesta-fetch-", dir=destination) as temporary:
+                attempt_root = Path(temporary)
+                batch: list[str] = []
+                staged_targets: list[tuple[str, dict, Path, Path]] = []
+                for member, info, final_target in final_targets:
+                    relative = PurePosixPath(member)
+                    staged_target = attempt_root.joinpath(*relative.parts)
+                    staged_target.parent.mkdir(parents=True, exist_ok=True)
+                    batch.append(
+                        f"get {self._sftp_quote(object_path / relative)} {self._sftp_quote(staged_target)}"
+                    )
+                    staged_targets.append((member, info, staged_target, final_target))
+                manifest_after = attempt_root / "manifest.json"
+                batch.append(
+                    f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(manifest_after)}"
+                )
+                try:
+                    self._sftp(batch)
+                except TransientSFTPError as exc:
+                    last_transient_error = exc
+                    if attempt == 0 and exc.retryable:
+                        time.sleep(0.25)
+                        continue
+                    raise
+
+                try:
+                    encoded_after = manifest_after.read_bytes()
+                    after = json.loads(encoded_after)
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise TierError(f"remote manifest changed during restore for {key.name}") from exc
+                if (hashlib.sha256(encoded_after).hexdigest() != expected_manifest_hash
+                        or after != manifest):
+                    raise TierError(f"remote manifest changed during restore for {key.name}")
+                for member, info, staged_target, _final_target in staged_targets:
+                    if staged_target.is_symlink() or not staged_target.is_file():
+                        raise TierError(f"downloaded bundle member is not a regular file: {member}")
+                    if (staged_target.stat().st_size != int(info["size"])
+                            or self._hash(staged_target) != info["sha256"]):
+                        raise TierError(f"download verification failed: {member}")
+                    with staged_target.open("rb") as file:
+                        os.fsync(file.fileno())
+
+                for _member, _info, staged_target, final_target in staged_targets:
+                    final_target.parent.mkdir(parents=True, exist_ok=True)
+                    if final_target.is_symlink() or final_target.exists():
+                        raise TierError(f"restore destination changed during restore: {final_target}")
+                    os.replace(staged_target, final_target)
+                    DirectoryObjectStore._fsync_dir(final_target.parent)
+                break
+        else:
+            raise TierError("SFTP restore failed after a transient disconnect") from last_transient_error
         return manifest
 
     def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None:

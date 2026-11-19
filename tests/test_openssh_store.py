@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fiesta_world_tier import OpenSSHConfig, OpenSSHObjectStore, RegionKey, TierError, TierManager
-from fiesta_world_tier.openssh_store import OpenSSHTransport
+from fiesta_world_tier.openssh_store import OpenSSHTransport, TransientSFTPError
 from fiesta_world_tier.store import RegionBundle
 
 
@@ -156,6 +156,24 @@ class CorruptingOpenSSH(FakeOpenSSH):
         return result
 
 
+class DisconnectingOpenSSH(FakeOpenSSH):
+    def __init__(self, root: Path, get_disconnects: int, retryable: bool = True):
+        super().__init__(root)
+        self.get_disconnects = get_disconnects
+        self.fail_fetch = False
+        self.retryable = retryable
+
+    def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        is_fetch = self.fail_fetch and any(line.startswith("get ") for line in batch.splitlines())
+        result = super().run_sftp(batch)
+        if is_fetch and self.get_disconnects:
+            self.get_disconnects -= 1
+            raise TransientSFTPError(
+                "simulated SSH disconnect after partial batch", retryable=self.retryable
+            )
+        return result
+
+
 class OpenSSHStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -236,6 +254,74 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertIn("manifest.json", self.transport.sftp_batches[0])
         for member, source in files.items():
             self.assertEqual((destination / member).read_bytes(), source.read_bytes())
+
+    def test_fetch_retries_once_after_transient_disconnect_in_private_staging(self):
+        transport = DisconnectingOpenSSH(self.root / "retry-remote", get_disconnects=1)
+        store = OpenSSHObjectStore(self.config, transport)
+        generation, digest = store.publish(self.key, self.create_bundle())
+        manifest, _ = store.read_manifest_with_hash(self.key)
+        transport.fail_fetch = True
+        transport.sftp_batches.clear()
+
+        destination = self.root / "retry-fetch"
+        self.assertEqual(
+            store.fetch(
+                self.key,
+                destination,
+                expected_manifest=manifest,
+                expected_manifest_hash=digest,
+            ),
+            generation,
+        )
+        self.assertEqual(len(transport.sftp_batches), 2)
+        for member, source in self.create_bundle().items():
+            self.assertEqual((destination / member).read_bytes(), source.read_bytes())
+        self.assertTrue(store._exists(store._object_path(self.key)))
+
+    def test_fetch_keeps_destination_empty_after_repeated_transient_disconnect(self):
+        transport = DisconnectingOpenSSH(self.root / "retry-twice-remote", get_disconnects=2)
+        store = OpenSSHObjectStore(self.config, transport)
+        store.publish(self.key, self.create_bundle())
+        manifest, digest = store.read_manifest_with_hash(self.key)
+        transport.fail_fetch = True
+        destination = self.root / "retry-twice-fetch"
+
+        with self.assertRaisesRegex(TransientSFTPError, "simulated SSH disconnect"):
+            store.fetch(
+                self.key,
+                destination,
+                expected_manifest=manifest,
+                expected_manifest_hash=digest,
+            )
+
+        self.assertEqual(list(destination.iterdir()), [])
+        self.assertTrue(store._exists(store._object_path(self.key)))
+
+    def test_fetch_does_not_retry_nonretryable_transport_timeout(self):
+        transport = DisconnectingOpenSSH(
+            self.root / "timeout-remote", get_disconnects=1, retryable=False
+        )
+        store = OpenSSHObjectStore(self.config, transport)
+        store.publish(self.key, self.create_bundle())
+        manifest, digest = store.read_manifest_with_hash(self.key)
+        transport.fail_fetch = True
+        transport.sftp_batches.clear()
+        destination = self.root / "timeout-fetch"
+
+        with self.assertRaisesRegex(TransientSFTPError, "simulated SSH disconnect"):
+            store.fetch(
+                self.key,
+                destination,
+                expected_manifest=manifest,
+                expected_manifest_hash=digest,
+            )
+
+        self.assertEqual(
+            sum(any(line.startswith("get ") for line in batch.splitlines()) for batch in transport.sftp_batches),
+            1,
+        )
+        self.assertEqual(list(destination.iterdir()), [])
+        self.assertTrue(store._exists(store._object_path(self.key)))
 
     def test_cleanup_refuses_a_manifest_changed_after_restore(self):
         files = self.create_bundle()

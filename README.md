@@ -49,6 +49,17 @@ removed. One earlier multiplexed store attempt timed out while later complete
 transfers passed, so retry and outage behavior still need testing. Player-facing
 restore latency remains an open requirement.
 
+A cold-region fetch now retries once after an SSH disconnect (exit code 255).
+Each attempt downloads into a private temporary directory and publishes files
+only after the bundle and manifest verify. Timeouts and SFTP command errors are
+not retried; a failed restore leaves the recovery marker and remote bundle for a
+later attempt.
+
+After this change, a real 1,048,607-byte synthetic Luna transfer completed in
+20.14 seconds for publish and 6.18 seconds for verified fetch. The restored
+SHA-256 matched, the remote object was deleted, and the unique test root was
+removed. This was a clean transfer with no retry needed.
+
 ## Safety requirements
 
 - Tier complete region bundles, not individual chunk NBT records. A bundle
