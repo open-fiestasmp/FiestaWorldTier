@@ -72,21 +72,26 @@ disposable-server tests. The patch has not been installed on Fiesta.
 
 ### Disposable transfer smoke test
 
-On 2026-11-19, a patched Paper 1.21.11 server used a fresh disposable world and
-a dedicated test directory on Luna. The opt-in scheduler uploaded one cold
-region bundle; the Paper command then forced a load of that remote-only region.
-Paper completed the load, the terrain region returned locally at its original
-file size, its remote-only marker was removed, and Luna's dedicated test
-directory was empty after restore. No Fiesta world files were used.
+On 2026-11-19, a patched Paper 1.21.11 server used a fresh disposable world
+and an isolated Luna test directory. The scheduler offloaded a synthetic 8 KiB
+region bundle. A corrected `World.getChunkAtAsync(..., generate=false)` probe
+then requested the remote-only region. Paper restored the file; its SHA-256
+matched the source, the durable marker cleared, and Luna test usage returned to
+zero. A tick monitor saw no gap above 500 ms. The callback took 27.379 seconds
+and returned `null`, because the synthetic region file contained no actual
+chunk. This confirms marker-driven file restoration only; it does not prove
+that Paper can load a real cold chunk or establish player-facing latency.
 
-The forced-load command waited about 27 seconds while the restore ran. Paper's
-watchdog emitted thread dumps during that wait, with the test command shown
-waiting for the chunk. This is a warning about cold-load latency and the test's
-synchronous force-load path, not evidence of data loss. The region was opened
-and the disposable server stopped cleanly. A byte-for-byte comparison after
-Paper subsequently saved the region was not performed. Measure ordinary player
-movement into a cold region separately and reduce/characterize the wait before
-production use.
+Earlier callback figures of 23.2 and 15.4 seconds came from a saved harness
+that passed `generate=true`, despite earlier notes saying otherwise. They are
+not valid no-generation restore measurements. A separate real-chunk fixture
+was attempted, but Paper's access tracker marked its region during startup, so
+it could not satisfy the cold-offload precondition. A real-chunk restore test
+is still needed. All runs used isolated worlds and did not touch Fiesta data.
+The post-optimization store-stage measurements total 7.97 seconds; the larger
+Paper callback time remains unexplained. Do not enable automatic offloading on
+Fiesta until the real-chunk path, latency, restart/crash recovery, outage
+behavior, and player movement are tested on disposable copies.
 
 The integration is intentionally fail-closed. If the marker, command,
 configuration, SSH host key, remote bundle, checksum, quota, or local disk

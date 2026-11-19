@@ -5,12 +5,13 @@ implementation checklist, not a claim that automatic eviction is available on
 Fiesta. The companion Paper patch supports marked demand restore, explicit
 leased offload, region access timestamps, and an opt-in idle scheduler. Python
 commands list age-based candidates and dry-run a local world-data budget plan.
-The scheduler and a real remote offload-and-restore cycle have passed an
-initial disposable Paper smoke test. Cold restore took about 27 seconds during
-a forced-load test and triggered watchdog dumps, so more latency and player
-movement testing is required. The scheduler is not installed on Fiesta. Do not
-enable automatic eviction on a live world until the gates below pass on a
-disposable copy.
+A corrected disposable Paper probe passed marker-driven remote file restoration,
+but it used a synthetic region with no actual chunk. Its `generate=false`
+callback took 27.379 seconds and returned `null`; this is not evidence that a
+real cold chunk loads correctly or quickly. Earlier 23.2- and 15.4-second
+measurements used a harness with `generate=true` and are superseded. The
+scheduler is not installed on Fiesta. Do not enable automatic eviction on a
+live world until the gates below pass on a disposable copy.
 
 ## What moves
 
@@ -126,11 +127,11 @@ offload is not part of the initial rollout.
 - Opt-in idle scheduler: implemented in the companion Paper patch, disabled by
   default, and not installed on Fiesta. It plans one cold region per pass and
   requires the main server to be empty before starting an offload. The tick,
-  Paper API handoff, real Luna upload, and marked demand restore have passed an
-  initial disposable-server smoke test. The forced-load restore waited about
-  27 seconds and triggered watchdog dumps; ordinary player movement latency,
-  clean byte-level post-save comparison, crash recovery, and outage behavior
-  remain to be tested.
+  Paper API handoff, real Luna upload, and synthetic marked-file restore passed
+  a disposable-server probe. Its callback took 27.379 seconds and returned
+  `null` because the fixture had no actual chunk. A real-chunk cold restore,
+  player movement latency, clean byte-level post-save comparison, crash
+  recovery, and outage behavior remain unverified.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and
