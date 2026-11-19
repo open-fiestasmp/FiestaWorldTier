@@ -43,6 +43,7 @@ class OpenSSHConfig:
     remote_root: PurePosixPath
     max_bytes: int
     control_path: Path | None = None
+    compression: bool = False
     timeout_seconds: int = 900
     lock_timeout_seconds: int = 30
 
@@ -55,6 +56,8 @@ class OpenSSHConfig:
             raise ValueError("SSH port must be between 1 and 65535")
         if self.max_bytes <= 0 or self.timeout_seconds <= 0 or self.lock_timeout_seconds <= 0:
             raise ValueError("size and timeout limits must be positive")
+        if type(self.compression) is not bool:
+            raise ValueError("compression must be a boolean")
         root = self.remote_root
         if (not root.is_absolute() or root.parts[0] != "/" or len(root.parts) < 4
                 or root.parts[1] != "home" or root.parts[2] != self.username):
@@ -70,8 +73,12 @@ class OpenSSHConfig:
         if mode & 0o077:
             raise ValueError("identity file permissions must exclude group and other access")
         if self.control_path is not None:
-            if not self.control_path.is_absolute() or self.control_path.name.count("%C") != 1:
+            control_template = str(self.control_path)
+            if not self.control_path.is_absolute() or control_template.count("%C") != 1:
                 raise ValueError("control_path must be absolute and contain exactly one %C token")
+            expanded_control_path = control_template.replace("%C", "0" * 40)
+            if len(os.fsencode(expanded_control_path)) > 80:
+                raise ValueError("control_path is too long for a Unix socket; use a shorter path")
             if "\n" in str(self.control_path) or "\r" in str(self.control_path) or "\x00" in str(self.control_path):
                 raise ValueError("control_path contains an invalid character")
             if self.control_path.parent.is_symlink() or not self.control_path.parent.is_dir():
@@ -113,6 +120,8 @@ class OpenSSHTransport:
                 "-o", "ControlPersist=30",
                 "-o", f"ControlPath={config.control_path}",
             ])
+        if config.compression:
+            self.options.extend(["-o", "Compression=yes"])
 
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(

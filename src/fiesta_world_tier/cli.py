@@ -90,6 +90,7 @@ def _make_manager(config: dict) -> TierManager:
         remote_root=PurePosixPath(remote["remote_root"]),
         max_bytes=int(remote["max_bytes"]),
         control_path=Path(remote["control_path"]) if remote.get("control_path") else None,
+        compression=remote.get("compression", False),
         timeout_seconds=int(remote.get("timeout_seconds", 900)),
     )
     store = OpenSSHObjectStore(store_config)

@@ -10,9 +10,10 @@ An isolated Paper probe restored a synthetic region file, but its
 `generate=false` callback took 27.379 seconds and returned `null`; that run did
 not contain a chunk. A later disposable Paper runtime test passed concurrent
 access during staged upload and cold restore of a saved chunk, using a local
-directory-object-store fixture. It proves those Paper paths with saved chunks,
-but does not measure Luna networking or player-facing latency. Earlier 23.2-
-and 15.4-second figures used a harness with `generate=true` and are superseded.
+directory-object-store fixture. A separate disposable run against Luna's SFTP
+endpoint also passed both paths; restore took about 8.5 seconds. Neither test
+measured player-facing latency. Earlier 23.2- and 15.4-second figures used a
+harness with `generate=true` and are superseded.
 The scheduler is not installed on Fiesta. Do not enable automatic eviction on
 a live world until the remaining gates below pass on a disposable copy.
 
@@ -136,8 +137,9 @@ offload is not part of the initial rollout.
   chunk during an 8-second upload; eviction was canceled, the local region
   remained, and the maximum tick gap was 71 ms. A separate saved gold-block
   region offloaded and restored on demand, with the block intact and marker
-  cleared. Both used a local directory-object-store fixture. Luna-network
-  behavior, actual player movement/latency, clean byte-level post-save
+  cleared. Both used a local directory-object-store fixture. A later disposable
+  run against Luna's SFTP endpoint also passed concurrent access and saved
+  region restore. Actual player movement/latency, byte-level post-save
   comparison, crash recovery, and outage behavior remain unverified.
 - Disposable Paper-server integration and production rollout: not complete.
 

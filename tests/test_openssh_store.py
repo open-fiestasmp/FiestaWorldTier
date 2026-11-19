@@ -421,6 +421,21 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertIn("ControlPersist=30", arguments)
         self.assertIn(f"ControlPath={self.config.control_path}", arguments)
 
+    def test_transport_enables_optional_ssh_compression_for_ssh_and_sftp(self):
+        config = OpenSSHConfig(**{**self.config.__dict__, "compression": True})
+        transport = OpenSSHTransport(config)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed) as run:
+            transport.run_ssh("true")
+            transport.run_sftp("pwd\n")
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertIn("Compression=yes", call.args[0])
+
+    def test_config_rejects_non_boolean_compression(self):
+        with self.assertRaisesRegex(ValueError, "compression must be a boolean"):
+            OpenSSHConfig(**{**self.config.__dict__, "compression": 1}).validate()
+
     def test_journaled_manager_can_offload_and_restore_over_sftp_fixture(self):
         server = self.root / "world-server"
         key_root = server / "world"
@@ -500,6 +515,13 @@ class OpenSSHStoreTests(unittest.TestCase):
         directory.mkdir(mode=0o755)
         control_path = directory / "control-%C"
         with self.assertRaisesRegex(ValueError, "control_path parent permissions"):
+            OpenSSHConfig(**{**self.config.__dict__, "control_path": control_path}).validate()
+
+    def test_config_rejects_control_socket_paths_that_exceed_unix_socket_limit(self):
+        directory = self.root / ("long-control-path-" * 4)
+        directory.mkdir(mode=0o700)
+        control_path = directory / "control-%C"
+        with self.assertRaisesRegex(ValueError, "too long for a Unix socket"):
             OpenSSHConfig(**{**self.config.__dict__, "control_path": control_path}).validate()
 
 

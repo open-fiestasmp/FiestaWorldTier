@@ -38,10 +38,25 @@ the local region intact with no marker or published remote object. The maximum
 observed tick gap was 71 ms. A separate saved gold-block chunk completed
 offload and demand restore; Paper returned the existing chunk, the marker
 cleared, the local region was present, and the fixture's remote copy was
-removed. This validates the staged Paper access and saved-chunk restore paths
-against a local fixture. It does not test the Luna network, an actual player
-session, or player-facing latency. Crash/outage recovery and production-scale
-transfers remain open.
+removed. This validates staged Paper access and saved-chunk restore against a
+local fixture. A later disposable run exercised both paths against Luna's
+actual SFTP endpoint: saved-region restore passed, but took about 8.5 seconds.
+No player session was connected. Crash/outage recovery, player-facing latency,
+and production-scale transfers remain open.
+
+A disposable Paper 1.21.11 run then exercised both paths against a dedicated,
+temporary object root on the actual Luna host. With SSH connection
+multiplexing enabled, the concurrent-access case uploaded a 1.19 MiB region,
+then canceled eviction and removed the remote duplicate after the chunk was
+used; the local region remained and the maximum tick gap was 61 ms. A separate
+651 KiB saved region offloaded and restored with its gold block intact, marker
+cleared, and remote usage back to zero. Publish took 17.1 seconds and restore
+8.5 seconds. Without multiplexing, the same saved-region cycle took 41.0
+seconds to publish and 29.8 seconds to restore. This is a real Luna transport
+test, but still an internal chunk request rather than a player session; 8.5
+seconds is too slow to call seamless. Test roots were removed and no Fiesta
+world data was transferred. Keep automatic eviction disabled until further
+latency and recovery work passes.
 
 A follow-up changed tiny manifest reads from SFTP downloads to stdout over the
 same pinned SSH connection. A real Luna smoke test with another synthetic
@@ -75,9 +90,10 @@ lease. If a player enters the candidate while its snapshot uploads, the final
 lease, access-age, and source checks cancel eviction and preserve the local
 region. The staged path passes Python lifecycle tests and a Paper compile. A
 disposable concurrent-access and saved-chunk restore test passed with a local
-directory-object-store fixture. Online mode is not installed or tested on
-Fiesta. Do not offload a production world until Luna-network, recovery, outage,
-and player-facing tests pass.
+directory-object-store fixture. A separate disposable Luna test also passed
+concurrent access, saved-chunk offload, and restore. Online mode is not
+installed or tested on Fiesta. Crash/outage recovery and player-facing latency
+still need testing before any production offload.
 
 After the verified-fetch batching change, a separate 1,048,607-byte synthetic
 region bundle passed publish, manifest/hash read, verified fetch, and guarded

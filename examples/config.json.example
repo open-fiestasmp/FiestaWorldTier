@@ -20,6 +20,7 @@
     "remote_root": "/home/fiesta-tier/fiesta-world-tier",
     "max_bytes": 90000000000,
     "control_path": "/var/lib/fiesta-world-tier/ssh-control-%C",
+    "compression": true,
     "timeout_seconds": 900
   }
 }
