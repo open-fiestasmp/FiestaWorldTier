@@ -5,11 +5,12 @@ implementation checklist, not a claim that automatic eviction is available on
 Fiesta. The companion Paper patch supports marked demand restore, explicit
 leased offload, region access timestamps, and an opt-in idle scheduler. Python
 commands list age-based candidates and dry-run a local world-data budget plan.
-The scheduler is not installed on Fiesta; its tick dispatch and leased-API call
-were exercised on a disposable Paper server with a fake CLI shim, while the
-real remote transfer and restore path still needs end-to-end testing.
-Do not enable automatic eviction on a live world until the gates below pass on
-a disposable copy.
+The scheduler and a real remote offload-and-restore cycle have passed an
+initial disposable Paper smoke test. Cold restore took about 27 seconds during
+a forced-load test and triggered watchdog dumps, so more latency and player
+movement testing is required. The scheduler is not installed on Fiesta. Do not
+enable automatic eviction on a live world until the gates below pass on a
+disposable copy.
 
 ## What moves
 
@@ -123,10 +124,13 @@ offload is not part of the initial rollout.
   experimentally. The planner reads an unlocked remote-usage snapshot to cap
   its estimate; each actual upload rechecks quota under the remote writer lock.
 - Opt-in idle scheduler: implemented in the companion Paper patch, disabled by
-  default, and not installed on Fiesta. Its idle tick and Paper API handoff
-  passed a disposable-server test with a fake CLI; real transfer and restore
-  testing remain outstanding. It plans one cold region per pass and requires
-  the main server to be empty before starting an offload.
+  default, and not installed on Fiesta. It plans one cold region per pass and
+  requires the main server to be empty before starting an offload. The tick,
+  Paper API handoff, real Luna upload, and marked demand restore have passed an
+  initial disposable-server smoke test. The forced-load restore waited about
+  27 seconds and triggered watchdog dumps; ordinary player movement latency,
+  clean byte-level post-save comparison, crash recovery, and outage behavior
+  remain to be tested.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and

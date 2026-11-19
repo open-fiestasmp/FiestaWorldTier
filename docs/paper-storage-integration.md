@@ -63,12 +63,30 @@ treated as new terrain. The Paper patch includes an explicit leased offload
 API and the Python `offload` command, which requires Paper's held OS file lock
 and rechecks the configured age under that lock.
 There is an experimental access-age catalog, dry-run candidate listing, and
-dry-run local-budget planner with advisory remote quota measurement, but no
-automatic scheduler or production caller invokes the API. Paper patch
-`0039` refuses offload after an access-tracking failure. Do not enable
-offloading on a live world until budget selection, restart/crash recovery, and
-concurrency behavior pass disposable-server tests. The patch has not been
-installed on Fiesta or exercised against a disposable Paper world.
+dry-run local-budget planner with advisory remote quota measurement. The opt-in
+scheduler has been exercised on a disposable server, but it is not installed
+on Fiesta. Paper patch `0039` refuses offload after an access-tracking failure.
+Do not enable offloading on a live world until budget selection,
+restart/crash recovery, player movement, and concurrency behavior pass
+disposable-server tests. The patch has not been installed on Fiesta.
+
+### Disposable transfer smoke test
+
+On 2026-11-19, a patched Paper 1.21.11 server used a fresh disposable world and
+a dedicated test directory on Luna. The opt-in scheduler uploaded one cold
+region bundle; the Paper command then forced a load of that remote-only region.
+Paper completed the load, the terrain region returned locally at its original
+file size, its remote-only marker was removed, and Luna's dedicated test
+directory was empty after restore. No Fiesta world files were used.
+
+The forced-load command waited about 27 seconds while the restore ran. Paper's
+watchdog emitted thread dumps during that wait, with the test command shown
+waiting for the chunk. This is a warning about cold-load latency and the test's
+synchronous force-load path, not evidence of data loss. The region was opened
+and the disposable server stopped cleanly. A byte-for-byte comparison after
+Paper subsequently saved the region was not performed. Measure ordinary player
+movement into a cold region separately and reduce/characterize the wait before
+production use.
 
 The integration is intentionally fail-closed. If the marker, command,
 configuration, SSH host key, remote bundle, checksum, quota, or local disk

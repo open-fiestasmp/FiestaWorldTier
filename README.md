@@ -12,10 +12,12 @@ opening it, and stop rather than generate a replacement if restore fails.
 The prototype models the durable transfer state machine and tests it against
 disposable worlds and a local object-store fixture. It includes an optional
 OpenSSH/SFTP adapter that requires a pinned host key and a restricted-permission
-identity file. The automated transport tests use a local fake; a separate
-synthetic publish/verify/fetch/delete smoke test has passed against Luna without
-using world data. The project never scans, copies, or deletes the live Fiesta
-world.
+identity file. Automated transport tests use a local fake. Synthetic transfer
+tests and a disposable Paper 1.21.11 offload-and-demand-restore smoke test have
+also passed against Luna without using world data. That Paper test exposed a
+long wait (about 27 seconds) for a forced load from cold storage, so restore
+latency and player-movement behavior still need more testing. The project never
+scans, copies, or deletes the live Fiesta world.
 
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
@@ -27,9 +29,10 @@ marked demand restore, per-region I/O leases, and an experimental
 uploads and evicts one region. The CLI also requires proof of Paper's
 cross-process lock; Java/Python lock interoperation was verified on Linux.
 The companion Paper patch includes an opt-in idle scheduler, but it is not
-installed on Fiesta and the complete live-storage path has not been exercised
-on a disposable server. Do not offload a production world until the access-age
-policy and integration gates below pass.
+installed on Fiesta. The transfer cycle has been exercised on a disposable
+Paper server; the access-age policy, player movement into cold regions, outage
+recovery, and crash/concurrency gates below still need to pass. Do not offload a
+production world until they do.
 
 ## Safety requirements
 
