@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import stat
 import sys
+import time
 from pathlib import Path, PurePosixPath
 
 from .leases import FileRegionLease
@@ -98,15 +100,35 @@ def _make_manager(config: dict) -> TierManager:
     )
 
 
+def _protected_region_names(config: dict) -> set[str]:
+    protected = config.get("protected_regions", [])
+    if not isinstance(protected, list) or any(
+        not isinstance(name, str)
+        or not re.fullmatch(r"(?:overworld|nether|end)/r\.-?\d+\.-?\d+", name)
+        for name in protected
+    ):
+        raise TierError("protected_regions must be a list of dimension/r.x.z region names")
+    return set(protected)
+
+
 def offload(args: argparse.Namespace) -> None:
     config = _private_json(Path(args.config).absolute())
     logical_dimension, dimension_root = _dimension_config(
         config, args.dimension_key, Path(args.dimension_root)
     )
     key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    age_days = config.get("cold_age_days", 30)
+    if not isinstance(age_days, (int, float)) or isinstance(age_days, bool) or not math.isfinite(age_days) or age_days <= 0:
+        raise TierError("cold age must be a positive finite number of days")
+    if key.name in _protected_region_names(config):
+        raise TierError(f"refusing offload of protected region: {key.name}")
     if not paper_lease_is_held(dimension_root, key):
         raise TierError("refusing offload without Paper's exclusive region lease")
-    _make_manager(config).offload(key)
+    manager = _make_manager(config)
+    last_access = manager.last_access(key)
+    if last_access is None or time.time() - last_access < float(age_days) * 86_400:
+        raise TierError("refusing offload because region access history is recent or unknown")
+    manager.offload(key)
 
 
 def restore(args: argparse.Namespace) -> None:
@@ -117,6 +139,29 @@ def restore(args: argparse.Namespace) -> None:
     key = RegionKey(logical_dimension, args.region_x, args.region_z)
     expected_hash = _read_marker(dimension_root, key, args.dimension_key)
     _make_manager(config).restore(key, expected_manifest_hash=expected_hash)
+
+
+def catalog(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    manager = _make_manager(config)
+    count = manager.catalog_local_regions(trust_atime=args.trust_atime)
+    print(json.dumps({"cataloged_local_regions": count}, separators=(",", ":")))
+
+
+def candidates(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    age_days = config.get("cold_age_days", 30) if args.age_days is None else args.age_days
+    if not isinstance(age_days, (int, float)) or isinstance(age_days, bool) or not math.isfinite(age_days) or age_days <= 0:
+        raise TierError("cold age must be a positive finite number of days")
+    protected_names = _protected_region_names(config)
+    manager = _make_manager(config)
+    manager.catalog_local_regions()
+    selected = manager.cold_regions(float(age_days) * 86_400)
+    print(json.dumps([
+        {"dimension": key.dimension, "region_x": key.x, "region_z": key.z}
+        for key in selected
+        if key.name not in protected_names
+    ], separators=(",", ":")))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,6 +183,21 @@ def build_parser() -> argparse.ArgumentParser:
     offload_parser.add_argument("--region-x", required=True, type=int)
     offload_parser.add_argument("--region-z", required=True, type=int)
     offload_parser.set_defaults(handler=offload)
+    catalog_parser = subparsers.add_parser(
+        "catalog", help="record local regions and initialize conservative access ages"
+    )
+    catalog_parser.add_argument("--config", required=True)
+    catalog_parser.add_argument(
+        "--trust-atime", action="store_true",
+        help="use filesystem access times only when the mount has verified atime semantics",
+    )
+    catalog_parser.set_defaults(handler=catalog)
+    candidates_parser = subparsers.add_parser(
+        "candidates", help="print regions older than the configured cold-age threshold"
+    )
+    candidates_parser.add_argument("--config", required=True)
+    candidates_parser.add_argument("--age-days", type=float)
+    candidates_parser.set_defaults(handler=candidates)
     return parser
 
 

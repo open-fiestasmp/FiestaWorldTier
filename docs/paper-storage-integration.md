@@ -28,7 +28,19 @@ command/config paths and timeout can be overridden with these JVM properties:
 -Dfiesta.worldTier.config=/etc/fiesta-world-tier/config.json
 -Dfiesta.worldTier.restoreTimeoutSeconds=300
 -Dfiesta.worldTier.offloadTimeoutSeconds=3600
+-Dfiesta.worldTier.accessWriteIntervalMillis=60000
 ```
+
+Paper records region-level shared-I/O use in an atomically replaced timestamp
+under `<dimension-root>/.world-tier/access/`. It syncs the first touch after a
+cold interval and throttles repeated writes to the configured interval. A
+missing timestamp is treated as hot. The CLI's `catalog` command seeds existing
+local regions as hot if no trustworthy history exists; `candidates` reports
+age-eligible regions and excludes configured `protected_regions`. The candidate
+listing is a dry run and does not enforce an Oracle local-storage budget.
+Set `cold_age_days` in the private JSON config; both candidate listing and the
+offload command use that value, and the command rechecks age under Paper's
+exclusive lock.
 
 The command validates the marker's dimension, coordinates, and manifest hash,
 checks the configured world root, verifies the complete downloaded bundle,
@@ -43,10 +55,12 @@ interrupted multi-file publication cannot be mistaken for a complete restore.
 
 This hook covers demand restore and prevents missing remote data from being
 treated as new terrain. The Paper patch includes an explicit leased offload
-API and the Python `offload` command, which requires Paper's held OS file lock.
-There is no automatic cold-region selector or scheduler, and no production
-caller invokes the API. Do not enable offloading on a live world until the
-access-age policy, restart/crash recovery, and concurrency behavior pass
+API and the Python `offload` command, which requires Paper's held OS file lock
+and rechecks the configured age under that lock.
+There is an experimental access-age catalog and dry-run candidate listing, but
+no local-storage budget controller or automatic scheduler, and no production
+caller invokes the API. Do not enable offloading on a live world until budget
+selection, restart/crash recovery, and concurrency behavior pass
 disposable-server tests. The patch has not been installed on Fiesta or
 exercised against a disposable Paper world.
 

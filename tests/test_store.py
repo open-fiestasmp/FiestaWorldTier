@@ -125,6 +125,19 @@ class RegionTierTests(unittest.TestCase):
         self.assertEqual(self.manager.catalog_local_regions(trust_atime=True), 1)
         self.assertEqual(self.manager.cold_regions(500, now=1000), [self.key])
 
+    def test_catalog_imports_durable_paper_access_timestamp(self):
+        self.manager._write_access_marker(self.key, 900)
+        self.assertEqual(self.manager.catalog_local_regions(when=1000), 1)
+        self.assertEqual(self.manager.cold_regions(200, now=1000), [])
+        self.assertEqual(self.manager.cold_regions(99, now=1000), [self.key])
+
+    def test_corrupt_access_marker_fails_closed(self):
+        marker = self.manager._access_marker_path(self.key)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("not-a-timestamp\n", encoding="ascii")
+        with self.assertRaisesRegex(TierError, "invalid region access marker"):
+            self.manager.catalog_local_regions(when=1000)
+
     def test_busy_region_is_never_evicted(self):
         self.lease.allow = False
         with self.assertRaisesRegex(TierError, "busy"):

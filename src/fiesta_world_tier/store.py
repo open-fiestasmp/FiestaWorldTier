@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -352,8 +353,89 @@ class TierManager:
             ).fetchone()
         return row[0] if row else "LOCAL_ONLY"
 
+    def last_access(self, key: RegionKey) -> float | None:
+        marker_timestamp = self._read_access_marker(key)
+        with self._db() as db:
+            row = db.execute(
+                "SELECT last_access FROM regions WHERE dimension=? AND x=? AND z=?",
+                (key.dimension, key.x, key.z),
+            ).fetchone()
+        database_timestamp = float(row[0]) if row else None
+        if marker_timestamp is None:
+            return database_timestamp
+        return max(marker_timestamp, database_timestamp or 0.0)
+
+    def _access_marker_path(self, key: RegionKey) -> Path:
+        dimension_root = self.server_root / DIMENSION_ROOTS[key.dimension]
+        if dimension_root.is_symlink() or not dimension_root.resolve().is_relative_to(self.server_root):
+            raise TierError(f"unsafe dimension root for access marker: {key.dimension}")
+        return dimension_root / ".world-tier" / "access" / f"r.{key.x}.{key.z}.touch"
+
+    def _read_access_marker(self, key: RegionKey) -> float | None:
+        marker = self._access_marker_path(key)
+        if not marker.exists() and not marker.is_symlink():
+            return None
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 32:
+            raise TierError(f"invalid region access marker: {marker}")
+        try:
+            raw_timestamp = marker.read_text(encoding="ascii").strip()
+            timestamp_ms = int(raw_timestamp)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise TierError(f"invalid region access marker: {marker}") from exc
+        if timestamp_ms <= 0:
+            raise TierError(f"invalid region access timestamp: {marker}")
+        timestamp = timestamp_ms / 1000.0
+        now = time.time()
+        if timestamp > now + 300:
+            # A clock jump must make a region newer, never colder.
+            return now
+        return timestamp
+
+    def _write_access_marker(self, key: RegionKey, timestamp: float, only_if_missing: bool = False) -> None:
+        marker = self._access_marker_path(key)
+        access_dir = marker.parent
+        for directory in (access_dir.parent, access_dir):
+            if directory.is_symlink():
+                raise TierError(f"region access directory is a symlink: {directory}")
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if not directory.is_dir() or not directory.resolve().is_relative_to(marker.parents[2].resolve()):
+                raise TierError(f"unsafe region access directory: {directory}")
+            os.chmod(directory, 0o700)
+        if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+            raise TierError(f"invalid region access marker: {marker}")
+        encoded = f"{int(timestamp * 1000)}\n".encode("ascii")
+        temporary = marker.with_name(marker.name + ".tmp-" + uuid.uuid4().hex)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            if only_if_missing:
+                try:
+                    os.link(temporary, marker, follow_symlinks=False)
+                except FileExistsError:
+                    pass
+                else:
+                    DirectoryObjectStore._fsync_dir(access_dir)
+            else:
+                os.replace(temporary, marker)
+                DirectoryObjectStore._fsync_dir(access_dir)
+        except OSError as exc:
+            raise TierError(f"could not persist region access marker: {marker}") from exc
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
     def record_access(self, key: RegionKey, when: float | None = None) -> None:
         timestamp = time.time() if when is None else when
+        if not math.isfinite(timestamp) or timestamp <= 0:
+            raise ValueError("access timestamp must be a positive finite value")
+        previous = self._read_access_marker(key)
+        if previous is not None:
+            timestamp = max(timestamp, previous)
+        self._write_access_marker(key, timestamp)
         with self._db() as db:
             db.execute("""INSERT INTO regions(dimension,x,z,state,last_access)
                 VALUES(?,?,?,'LOCAL_ONLY',?)
@@ -392,14 +474,27 @@ class TierManager:
                     except FileNotFoundError:
                         # Concurrent removal or rename: age this entry from now.
                         last_access = baseline
+                marker_access = self._read_access_marker(key)
+                if marker_access is not None:
+                    last_access = max(marker_access, last_access) if trust_atime else marker_access
+                else:
+                    # Existing terrain with no trustworthy history starts hot.
+                    self._write_access_marker(key, last_access, only_if_missing=True)
+                    marker_access = self._read_access_marker(key)
+                    if marker_access is not None:
+                        last_access = max(last_access, marker_access)
                 discovered[key] = last_access
         with self._db() as db:
-            db.executemany("""INSERT OR IGNORE INTO regions
-                (dimension,x,z,state,last_access) VALUES(?,?,?,'LOCAL_ONLY',?)""",
+            db.executemany("""INSERT INTO regions
+                (dimension,x,z,state,last_access) VALUES(?,?,?,'LOCAL_ONLY',?)
+                ON CONFLICT(dimension,x,z) DO UPDATE SET
+                  last_access=MAX(regions.last_access,excluded.last_access)""",
                 ((key.dimension, key.x, key.z, discovered[key]) for key in sorted(discovered)))
         return len(discovered)
 
     def cold_regions(self, age_seconds: float, now: float | None = None) -> list[RegionKey]:
+        if not math.isfinite(age_seconds) or age_seconds < 0:
+            raise ValueError("cold age must be a finite non-negative number")
         cutoff = (time.time() if now is None else now) - age_seconds
         with self._db() as db:
             rows = db.execute("""SELECT dimension,x,z FROM regions

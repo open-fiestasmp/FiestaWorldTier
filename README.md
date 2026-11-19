@@ -52,7 +52,27 @@ world until the access-age policy and integration gates below pass.
 ## Prototype
 
 `src/fiesta_world_tier/` contains the manifest, local fixture store, pinned
-OpenSSH/SFTP store, journal, marker lifecycle, and restore command. Run its unit tests with:
+OpenSSH/SFTP store, journal, access catalog, marker lifecycle, and restore and
+offload commands. Paper writes a durable region-level touch timestamp under
+`<dimension-root>/.world-tier/access/` when shared region I/O begins. The first
+touch and later touches at the write interval are atomically published and
+synced; an unreadable access marker disables cold selection for that dimension.
+
+The catalog seeds existing local regions as hot when no history exists. Only
+use `--trust-atime` if the filesystem mount's access-time behavior has been
+verified. Candidate listing is a dry run, applies the configured `cold_age_days`
+(default 30), and excludes entries in `protected_regions`, for example
+`["overworld/r.0.0", "nether/r.3.-2"]`:
+
+```sh
+fiesta-world-tier catalog --config /etc/fiesta-world-tier/config.json
+fiesta-world-tier candidates --config /etc/fiesta-world-tier/config.json
+```
+
+Paper tracks region access and rejects offloading if its tracker became
+unhealthy. The Python child then rechecks the configured access age while
+Paper's exclusive OS lock is held. No candidate scheduler currently calls this
+API. Run the unit tests with:
 
 ```sh
 python3 -m unittest discover -s tests -v
