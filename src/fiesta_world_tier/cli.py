@@ -187,6 +187,7 @@ def plan(args: argparse.Namespace) -> None:
         float(age_days) * 86_400,
         protected_names,
         remote_available_bytes=remote_available_bytes,
+        max_selected=args.max_selected,
     )
     result["selected"] = [
         {
@@ -252,6 +253,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_parser.add_argument("--config", required=True)
     plan_parser.add_argument("--target-bytes", type=int)
+    plan_parser.add_argument(
+        "--max-selected", type=int,
+        help="limit the dry-run result to this many oldest cold bundles",
+    )
     plan_parser.set_defaults(handler=plan)
     return parser
 

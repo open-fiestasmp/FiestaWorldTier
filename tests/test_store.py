@@ -176,6 +176,24 @@ class RegionTierTests(unittest.TestCase):
         self.assertEqual([item["key"] for item in fitting["selected"]], [self.key])
         self.assertEqual(fitting["planned_remote_bytes"], remote_size)
 
+    def test_budget_plan_can_limit_result_to_one_bundle_per_cycle(self):
+        newer_key = RegionKey("overworld", 1, 0)
+        newer_region = self.root / "world/region/r.1.0.mca"
+        newer_region.write_bytes(b"newer region bytes")
+        self.manager.record_access(self.key, when=100)
+        self.manager.record_access(newer_key, when=500)
+
+        plan = self.manager.plan_local_budget(
+            target_bytes=0,
+            age_seconds=100,
+            now=1000,
+            max_selected=1,
+        )
+
+        self.assertEqual([item["key"] for item in plan["selected"]], [self.key])
+        self.assertEqual(plan["planned_bytes"], self.manager.local_region_size(self.key))
+        self.assertGreater(plan["unmet_bytes"], 0)
+
     def test_budget_plan_leaves_target_unmet_when_only_region_is_hot_or_protected(self):
         size = self.manager.local_region_size(self.key)
         self.manager.record_access(self.key, when=950)

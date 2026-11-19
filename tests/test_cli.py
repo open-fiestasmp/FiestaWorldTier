@@ -272,8 +272,10 @@ class PaperLeaseCliTests(unittest.TestCase):
             def catalog_local_regions(self):
                 self.catalog_calls += 1
 
-            def plan_local_budget(self, target_bytes, age_seconds, protected, remote_available_bytes):
-                self.arguments = (target_bytes, age_seconds, protected, remote_available_bytes)
+            def plan_local_budget(
+                self, target_bytes, age_seconds, protected, remote_available_bytes, max_selected
+            ):
+                self.arguments = (target_bytes, age_seconds, protected, remote_available_bytes, max_selected)
                 return {
                     "current_bytes": 2048,
                     "target_bytes": target_bytes,
@@ -290,7 +292,7 @@ class PaperLeaseCliTests(unittest.TestCase):
 
         manager = FakeManager()
         args = build_parser().parse_args([
-            "plan", "--config", str(self.config), "--target-bytes", "1024",
+            "plan", "--config", str(self.config), "--target-bytes", "1024", "--max-selected", "1",
         ])
         output = io.StringIO()
         with patch("fiesta_world_tier.cli._make_manager", return_value=manager):
@@ -299,7 +301,7 @@ class PaperLeaseCliTests(unittest.TestCase):
 
         payload = json.loads(output.getvalue())
         self.assertEqual(manager.catalog_calls, 1)
-        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set(), 9750))
+        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set(), 9750, 1))
         self.assertEqual(payload["selected"], [{
             "dimension": "overworld",
             "region_x": -1,

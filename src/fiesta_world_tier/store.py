@@ -534,10 +534,13 @@ class TierManager:
         protected_regions: set[str] | None = None,
         now: float | None = None,
         remote_available_bytes: int | None = None,
+        max_selected: int | None = None,
     ) -> dict:
         """Choose oldest cold local bundles needed to meet a dry-run size target."""
         if type(target_bytes) is not int or target_bytes < 0:
             raise ValueError("local world-data target must be a non-negative integer")
+        if max_selected is not None and (type(max_selected) is not int or max_selected < 1):
+            raise ValueError("maximum selected bundles must be a positive integer")
         if (remote_available_bytes is not None
                 and (type(remote_available_bytes) is not int or remote_available_bytes < 0)):
             raise ValueError("remote available quota must be a non-negative integer")
@@ -568,7 +571,9 @@ class TierManager:
                 })
                 planned_bytes += size
                 planned_remote_bytes += remote_size
-                if planned_bytes >= needed_bytes:
+                if planned_bytes >= needed_bytes or (
+                    max_selected is not None and len(selected) >= max_selected
+                ):
                     break
         return {
             "current_bytes": current_bytes,
