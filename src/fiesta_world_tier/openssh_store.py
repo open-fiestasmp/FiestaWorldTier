@@ -44,6 +44,7 @@ class OpenSSHConfig:
     max_bytes: int
     control_path: Path | None = None
     compression: bool = False
+    sftp_download_buffer_size_bytes: int = 262144
     timeout_seconds: int = 900
     lock_timeout_seconds: int = 30
 
@@ -58,6 +59,9 @@ class OpenSSHConfig:
             raise ValueError("size and timeout limits must be positive")
         if type(self.compression) is not bool:
             raise ValueError("compression must be a boolean")
+        if (type(self.sftp_download_buffer_size_bytes) is not int
+                or not 32768 <= self.sftp_download_buffer_size_bytes <= 262144):
+            raise ValueError("SFTP download buffer size must be an integer between 32768 and 262144 bytes")
         root = self.remote_root
         if (not root.is_absolute() or root.parts[0] != "/" or len(root.parts) < 4
                 or root.parts[1] != "home" or root.parts[2] != self.username):
@@ -136,7 +140,14 @@ class OpenSSHTransport:
         return result
 
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
-        sftp_options = ["-P", str(self.config.port), *self.options[2:]]
+        commands = {line.strip().split(maxsplit=1)[0].lower() for line in batch.splitlines() if line.strip()}
+        sftp_options = ["-P", str(self.config.port)]
+        # Luna's SFTP server accepts 256 KiB read requests, but rejected larger
+        # write packets. Only get-only batches use the tuned download buffer;
+        # uploads and mixed batches keep OpenSSH's compatible default.
+        if commands and commands <= {"get"}:
+            sftp_options.extend(["-B", str(self.config.sftp_download_buffer_size_bytes)])
+        sftp_options.extend(self.options[2:])
         try:
             result = subprocess.run(
                 ["sftp", "-b", "-", *sftp_options, self.target],
@@ -557,9 +568,69 @@ class OpenSSHObjectStore:
             raise TierError("SFTP restore failed after a transient disconnect") from last_transient_error
         return manifest
 
-    def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None:
+    def delete(
+        self,
+        key: RegionKey,
+        *,
+        expected_manifest_hash: str | None = None,
+        expected_manifest: dict | None = None,
+    ) -> None:
+        if expected_manifest is not None and expected_manifest_hash is not None:
+            self._validate_manifest(key, expected_manifest)
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_hash):
+                raise TierError("invalid expected manifest checksum for remote cleanup")
+            object_path = self._object_path(key)
+            manifest_path = self._manifest_path(key)
+            lock_path = self.lock_path
+            lines = [
+                "set -eu",
+                "umask 077",
+                f"lock_path={shlex.quote(str(lock_path))}",
+                "if ! mkdir -- \"$lock_path\"; then exit 73; fi",
+                "cleanup() { rmdir -- \"$lock_path\" >/dev/null 2>&1 || true; }",
+                "trap cleanup EXIT",
+                "trap 'exit 129' HUP",
+                "trap 'exit 130' INT",
+                "trap 'exit 143' TERM",
+                f"manifest_path={shlex.quote(str(manifest_path))}",
+                "actual=$(sha256sum -- \"$manifest_path\")",
+                "actual=${actual%% *}",
+                f"if [ \"$actual\" != {shlex.quote(expected_manifest_hash)} ]; then echo FIESTA_TIER_MANIFEST_MISMATCH >&2; exit 71; fi",
+            ]
+            lines.extend(
+                f"rm -- {shlex.quote(self._remote_path(object_path / PurePosixPath(member)))}"
+                for member in sorted(expected_manifest["files"])
+            )
+            directories = sorted(
+                {
+                    object_path / PurePosixPath(member).parent
+                    for member in expected_manifest["files"]
+                    if PurePosixPath(member).parent != PurePosixPath(".")
+                },
+                key=lambda path: len(path.parts),
+                reverse=True,
+            )
+            lines.extend(
+                f"rmdir -- {shlex.quote(self._remote_path(path))}"
+                for path in directories
+            )
+            lines.extend([
+                f"rm -- {shlex.quote(self._remote_path(manifest_path))}",
+                f"rmdir -- {shlex.quote(self._remote_path(object_path))}",
+            ])
+            result = self._ssh("; ".join(lines), check=False)
+            if result.returncode == 71 and "FIESTA_TIER_MANIFEST_MISMATCH" in result.stderr:
+                raise TierError(f"remote manifest changed before cleanup for {key.name}")
+            if result.returncode == 73:
+                raise TierError("remote writer lock is already present; inspect it before cleanup")
+            if result.returncode != 0:
+                raise TierError(f"remote bundle cleanup failed (exit {result.returncode}); inspect remote state")
+            return
+
         with self._lock, self._remote_writer_lock():
             manifest, encoded = self._manifest(key)
+            if expected_manifest is not None and manifest != expected_manifest:
+                raise TierError(f"remote manifest changed before cleanup for {key.name}")
             if (expected_manifest_hash is not None
                     and hashlib.sha256(encoded).hexdigest() != expected_manifest_hash):
                 raise TierError(f"remote manifest changed before cleanup for {key.name}")

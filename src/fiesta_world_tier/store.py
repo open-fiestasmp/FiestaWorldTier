@@ -107,7 +107,13 @@ class BundleObjectStore(Protocol):
         expected_manifest: dict | None = None,
         expected_manifest_hash: str | None = None,
     ) -> dict: ...
-    def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None: ...
+    def delete(
+        self,
+        key: RegionKey,
+        *,
+        expected_manifest_hash: str | None = None,
+        expected_manifest: dict | None = None,
+    ) -> None: ...
 
     @staticmethod
     def _valid_member(key: RegionKey, member: str) -> bool: ...
@@ -313,11 +319,23 @@ class DirectoryObjectStore:
             raise TierError(f"remote manifest changed during restore for {key.name}")
         return manifest
 
-    def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None:
+    def delete(
+        self,
+        key: RegionKey,
+        *,
+        expected_manifest_hash: str | None = None,
+        expected_manifest: dict | None = None,
+    ) -> None:
         with self._lock:
             path = self._object_path(key)
             if path.exists():
-                if expected_manifest_hash is not None and self.manifest_hash(key) != expected_manifest_hash:
+                if expected_manifest is not None:
+                    current_manifest, current_hash = self.read_manifest_with_hash(key)
+                    if current_manifest != expected_manifest:
+                        raise TierError(f"remote manifest changed before cleanup for {key.name}")
+                    if expected_manifest_hash is not None and current_hash != expected_manifest_hash:
+                        raise TierError(f"remote manifest changed before cleanup for {key.name}")
+                elif expected_manifest_hash is not None and self.manifest_hash(key) != expected_manifest_hash:
                     raise TierError(f"remote manifest changed before cleanup for {key.name}")
                 shutil.rmtree(path)
                 self._fsync_dir(path.parent)
@@ -1185,7 +1203,11 @@ class TierManager:
                     # copy, never a marker pointing at an already-deleted object.
                     self._remove_remote_marker(key, expected_manifest_hash)
                     self._set_state(key, "CACHED")
-                    self.store.delete(key, expected_manifest_hash=expected_manifest_hash)
+                    self.store.delete(
+                        key,
+                        expected_manifest_hash=expected_manifest_hash,
+                        expected_manifest=manifest_before,
+                    )
                     self._set_state(key, "LOCAL_ONLY")
                 finally:
                     if stage.exists():

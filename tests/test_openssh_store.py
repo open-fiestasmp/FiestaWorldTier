@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -41,6 +43,46 @@ class FakeOpenSSH:
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         self.ssh_commands.append(command)
         output = ""
+        if command.startswith("set -eu; "):
+            assignments = {}
+            for part in command.split("; "):
+                if part.startswith(("lock_path=", "manifest_path=")):
+                    name, value = part.split("=", 1)
+                    assignments[name] = shlex.split(value)[0]
+            lock_remote = assignments["lock_path"]
+            manifest_remote = assignments["manifest_path"]
+            digest_match = re.search(r"!= ([0-9a-f]{64})", command)
+            if digest_match is None:
+                raise AssertionError("atomic cleanup command omitted its manifest checksum")
+            lock_path = self.path(lock_remote)
+            if lock_path.exists():
+                return self.result(73, error="writer lock exists")
+            lock_path.mkdir()
+            try:
+                manifest_path = self.path(manifest_remote)
+                encoded = manifest_path.read_bytes()
+                if hashlib.sha256(encoded).hexdigest() != digest_match.group(1):
+                    return self.result(71, error="FIESTA_TIER_MANIFEST_MISMATCH")
+                manifest = json.loads(encoded)
+                object_remote = PurePosixPath(manifest_remote).parent
+                for member in sorted(manifest["files"]):
+                    self.path(str(object_remote / member)).unlink()
+                directories = sorted(
+                    {
+                        PurePosixPath(member).parent
+                        for member in manifest["files"]
+                        if PurePosixPath(member).parent != PurePosixPath(".")
+                    },
+                    key=lambda path: len(path.parts),
+                    reverse=True,
+                )
+                for directory in directories:
+                    self.path(str(object_remote / directory)).rmdir()
+                manifest_path.unlink()
+                self.path(str(object_remote)).rmdir()
+                return self.result()
+            finally:
+                lock_path.rmdir()
         exists_match = re.fullmatch(
             r"if \[ -L (.*?) \]; then exit 2; elif \[ -e (.*?) \]; then exit 0; else exit 1; fi",
             command,
@@ -361,6 +403,65 @@ class OpenSSHStoreTests(unittest.TestCase):
             self.store.delete(self.key, expected_manifest_hash=digest)
         self.assertTrue(self.transport.path(str(self.store._object_path(self.key) / "region/r.-2.5.mca")).is_file())
 
+    def test_cleanup_with_known_manifest_uses_one_hash_guarded_remote_command(self):
+        generation, digest = self.store.publish(self.key, self.create_bundle())
+        self.transport.ssh_commands.clear()
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(self.transport, "run_ssh", return_value=completed) as run:
+            self.store.delete(
+                self.key,
+                expected_manifest_hash=digest,
+                expected_manifest=generation,
+            )
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args.args[0]
+        self.assertIn("mkdir --", command)
+        self.assertIn("sha256sum --", command)
+        self.assertIn(digest, command)
+        self.assertIn("trap cleanup EXIT", command)
+        self.assertIn("rmdir --", command)
+        self.assertEqual(self.transport.ssh_commands, [])
+
+    def test_cleanup_known_manifest_refuses_remote_hash_mismatch(self):
+        generation, digest = self.store.publish(self.key, self.create_bundle())
+        completed = subprocess.CompletedProcess(
+            [], 71, "", "FIESTA_TIER_MANIFEST_MISMATCH"
+        )
+        with patch.object(self.transport, "run_ssh", return_value=completed):
+            with self.assertRaisesRegex(TierError, "manifest changed before cleanup"):
+                self.store.delete(
+                    self.key,
+                    expected_manifest_hash=digest,
+                    expected_manifest=generation,
+                )
+
+    def test_cleanup_known_manifest_keeps_remote_data_when_hash_changes(self):
+        generation, digest = self.store.publish(self.key, self.create_bundle())
+        manifest_path = self.transport.path(str(self.store._manifest_path(self.key)))
+        manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+        with self.assertRaisesRegex(TierError, "manifest changed before cleanup"):
+            self.store.delete(
+                self.key,
+                expected_manifest_hash=digest,
+                expected_manifest=generation,
+            )
+        self.assertTrue(self.store.object_exists(self.key))
+        self.assertTrue(self.transport.path(str(self.store._object_path(self.key) / "region/r.-2.5.mca")).is_file())
+        self.assertFalse(self.transport.path(str(self.store.lock_path)).exists())
+
+    def test_cleanup_known_manifest_does_not_remove_an_existing_writer_lock(self):
+        generation, digest = self.store.publish(self.key, self.create_bundle())
+        lock_path = self.transport.path(str(self.store.lock_path))
+        lock_path.mkdir()
+        with self.assertRaisesRegex(TierError, "writer lock is already present"):
+            self.store.delete(
+                self.key,
+                expected_manifest_hash=digest,
+                expected_manifest=generation,
+            )
+        self.assertTrue(lock_path.is_dir())
+        self.assertTrue(self.store.object_exists(self.key))
+
     def test_usage_snapshot_is_advisory_and_does_not_create_remote_directories(self):
         self.assertEqual(self.store.usage_snapshot(), 0)
         self.assertFalse(self.transport.path(str(self.store.objects)).exists())
@@ -410,6 +511,29 @@ class OpenSSHStoreTests(unittest.TestCase):
             transport.run_sftp("pwd\n")
         arguments = run.call_args.args[0]
         self.assertEqual(arguments[:5], ["sftp", "-b", "-", "-P", str(self.config.port)])
+        self.assertNotIn("-B", arguments)
+
+    def test_sftp_uses_tuned_buffer_for_downloads_but_keeps_upload_default(self):
+        transport = OpenSSHTransport(self.config)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed) as run:
+            transport.run_sftp('get "remote/file" "/tmp/file"\n')
+            download_args = run.call_args.args[0]
+            transport.run_sftp('put "/tmp/file" "remote/file"\n')
+            upload_args = run.call_args.args[0]
+            transport.run_sftp('get "remote/a" "/tmp/a"\nput "/tmp/b" "remote/b"\n')
+            mixed_args = run.call_args.args[0]
+        self.assertIn("-B", download_args)
+        self.assertIn("262144", download_args)
+        self.assertNotIn("-B", upload_args)
+        self.assertNotIn("-B", mixed_args)
+
+    def test_config_rejects_unsupported_sftp_buffer_sizes(self):
+        for value in (32767, 262145, True):
+            with self.subTest(value=value):
+                config = OpenSSHConfig(**{**self.config.__dict__, "sftp_download_buffer_size_bytes": value})
+                with self.assertRaisesRegex(ValueError, "SFTP download buffer size"):
+                    config.validate()
 
     def test_transport_enables_private_connection_multiplexing(self):
         transport = OpenSSHTransport(self.config)

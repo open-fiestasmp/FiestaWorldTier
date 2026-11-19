@@ -71,6 +71,22 @@ store stages total 7.97 seconds. A post-optimization Paper probe took
 region contained no chunk. The gap between store-stage and Paper callback
 timings remains unexplained and needs investigation before player-facing use.
 
+A direct Luna SFTP benchmark downloaded the same 651 KiB synthetic region
+twice with each buffer setting. The default 32 KiB buffer took 5.12 and 4.07
+seconds; a 256 KiB buffer took 3.67 and 3.57 seconds. The adapter now uses the
+tested 256 KiB buffer for download-only SFTP batches
+(`sftp_download_buffer_size_bytes`). Uploads retain OpenSSH's 32 KiB default: a
+real Luna probe rejected 256 KiB writes as an oversized packet. The download
+benchmark improved by about 21%; the full Paper restore cycle still needs a
+repeat with the larger download buffer.
+
+With the larger download buffer and hash-guarded single-command cleanup, a
+disposable 651 KiB store restore sequence took 0.50 seconds for the manifest,
+6.00 seconds for fetch, and 0.57 seconds for remote cleanup (7.07 seconds
+total). The checksum matched and remote usage returned to zero. This measured
+the storage API, not a Paper callback or connected player; the live player
+latency gate remains open.
+
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
 Use a server-side quota as a second limit where the host supports it. A sample

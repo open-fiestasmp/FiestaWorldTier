@@ -144,6 +144,23 @@ bandwidth-limited links, but these end-to-end measurements do not show a
 reliable latency gain from it; the measured improvement came from connection
 multiplexing.
 
+A direct Luna SFTP benchmark downloaded the same 651 KiB synthetic region
+twice with each buffer setting. The default 32 KiB buffer took 5.116 and 4.068
+seconds; 256 KiB took 3.671 and 3.573 seconds. The adapter now uses the tested
+256 KiB buffer for download-only batches via `sftp_download_buffer_size_bytes`.
+Uploads retain OpenSSH's 32 KiB default because Luna rejected 256 KiB writes as
+an oversized packet. This small download benchmark improved by about 21%;
+repeat the full Paper restore cycle before treating that as an end-to-end
+result. OpenSSH documents the round-trip and memory tradeoff for larger buffers
+([manual](https://man.openbsd.org/sftp)).
+
+With the larger download buffer and hash-guarded single-command cleanup, a
+disposable 651 KiB store restore sequence took 0.50 seconds for the manifest,
+6.00 seconds for fetch, and 0.57 seconds for remote cleanup (7.07 seconds
+total). The checksum matched and remote usage returned to zero. This measured
+the storage API, not a Paper callback or connected player; player-facing
+latency remains unverified.
+
 The test also exposed an OpenSSH Unix-domain socket path limit: a long
 `ControlPath` failed before transfer. `OpenSSHConfig.validate()` now rejects a
 template whose `%C`-expanded path exceeds 80 bytes, leaving room for OpenSSH's
