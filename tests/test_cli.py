@@ -215,9 +215,11 @@ class PaperLeaseCliTests(unittest.TestCase):
             def __init__(self):
                 self.catalog_calls = 0
                 self.age_seconds = None
+                self.trust_atime = None
 
-            def catalog_local_regions(self):
+            def catalog_local_regions(self, trust_atime=False):
                 self.catalog_calls += 1
+                self.trust_atime = trust_atime
                 return 1
 
             def cold_regions(self, age_seconds):
@@ -234,6 +236,7 @@ class PaperLeaseCliTests(unittest.TestCase):
                 candidates(args)
 
         self.assertEqual(manager.catalog_calls, 1)
+        self.assertFalse(manager.trust_atime)
         self.assertEqual(manager.age_seconds, 7 * 86_400)
         self.assertEqual(json.loads(output.getvalue()), [
             {"dimension": "overworld", "region_x": -1, "region_z": 2},
@@ -242,6 +245,7 @@ class PaperLeaseCliTests(unittest.TestCase):
         protected_config = Path(self.temp.name) / "protected-config.json"
         payload = json.loads(self.config.read_text(encoding="utf-8"))
         payload["protected_regions"] = ["overworld/r.-1.2"]
+        payload["trust_filesystem_atime"] = True
         protected_config.write_text(json.dumps(payload), encoding="utf-8")
         protected_config.chmod(0o600)
         args = build_parser().parse_args(["candidates", "--config", str(protected_config)])
@@ -250,6 +254,7 @@ class PaperLeaseCliTests(unittest.TestCase):
             with redirect_stdout(output):
                 candidates(args)
         self.assertEqual(json.loads(output.getvalue()), [])
+        self.assertTrue(manager.trust_atime)
 
         payload["protected_regions"] = ["not-a-region"]
         protected_config.write_text(json.dumps(payload), encoding="utf-8")
@@ -263,14 +268,16 @@ class PaperLeaseCliTests(unittest.TestCase):
         class FakeManager:
             def __init__(self):
                 self.catalog_calls = 0
+                self.trust_atime = None
                 self.arguments = None
                 self.store = type("FakeStore", (), {
                     "max_bytes": 10_000,
                     "usage_snapshot": lambda _self: 250,
                 })()
 
-            def catalog_local_regions(self):
+            def catalog_local_regions(self, trust_atime=False):
                 self.catalog_calls += 1
+                self.trust_atime = trust_atime
 
             def plan_local_budget(
                 self, target_bytes, age_seconds, protected, remote_available_bytes, max_selected
@@ -301,6 +308,7 @@ class PaperLeaseCliTests(unittest.TestCase):
 
         payload = json.loads(output.getvalue())
         self.assertEqual(manager.catalog_calls, 1)
+        self.assertFalse(manager.trust_atime)
         self.assertEqual(manager.arguments, (1024, 30 * 86_400, set(), 9750, 1))
         self.assertEqual(payload["selected"], [{
             "dimension": "overworld",
@@ -311,11 +319,43 @@ class PaperLeaseCliTests(unittest.TestCase):
             "last_access": 100.0,
         }])
         self.assertEqual(payload["mode"], "dry-run")
+        self.assertFalse(payload["filesystem_atime_trusted"])
         self.assertFalse(payload["automatic_eviction_enabled"])
         self.assertTrue(payload["requires_paper_region_lease_before_each_offload"])
         self.assertEqual(payload["remote_usage_bytes"], 250)
         self.assertEqual(payload["remote_available_bytes"], 9750)
         self.assertTrue(payload["remote_usage_snapshot_is_advisory"])
+
+        config_payload = json.loads(self.config.read_text(encoding="utf-8"))
+        config_payload["trust_filesystem_atime"] = True
+        self.config.write_text(json.dumps(config_payload), encoding="utf-8")
+        self.config.chmod(0o600)
+        manager = FakeManager()
+        args = build_parser().parse_args([
+            "plan", "--config", str(self.config), "--target-bytes", "1024",
+        ])
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager", return_value=manager):
+            with redirect_stdout(output):
+                plan(args)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(manager.trust_atime)
+        self.assertTrue(payload["filesystem_atime_trusted"])
+
+    def test_plan_rejects_non_boolean_filesystem_atime_setting(self):
+        from fiesta_world_tier.cli import build_parser, plan
+
+        payload = json.loads(self.config.read_text(encoding="utf-8"))
+        payload["trust_filesystem_atime"] = "yes"
+        self.config.write_text(json.dumps(payload), encoding="utf-8")
+        self.config.chmod(0o600)
+        args = build_parser().parse_args([
+            "plan", "--config", str(self.config), "--target-bytes", "1024",
+        ])
+        with patch("fiesta_world_tier.cli._make_manager") as make_manager:
+            with self.assertRaisesRegex(TierError, "trust_filesystem_atime must be a boolean"):
+                plan(args)
+        make_manager.assert_not_called()
 
 
 class StorageCliTests(unittest.TestCase):

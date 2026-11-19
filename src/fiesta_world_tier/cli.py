@@ -115,6 +115,13 @@ def _protected_region_names(config: dict) -> set[str]:
     return set(protected)
 
 
+def _trust_filesystem_atime(config: dict) -> bool:
+    value = config.get("trust_filesystem_atime", False)
+    if type(value) is not bool:
+        raise TierError("trust_filesystem_atime must be a boolean")
+    return value
+
+
 def offload(args: argparse.Namespace) -> None:
     config = _private_json(Path(args.config).absolute())
     logical_dimension, dimension_root = _dimension_config(
@@ -147,8 +154,9 @@ def restore(args: argparse.Namespace) -> None:
 
 def catalog(args: argparse.Namespace) -> None:
     config = _private_json(Path(args.config).absolute())
+    trust_atime = args.trust_atime or _trust_filesystem_atime(config)
     manager = _make_manager(config)
-    count = manager.catalog_local_regions(trust_atime=args.trust_atime)
+    count = manager.catalog_local_regions(trust_atime=trust_atime)
     print(json.dumps({"cataloged_local_regions": count}, separators=(",", ":")))
 
 
@@ -204,8 +212,9 @@ def candidates(args: argparse.Namespace) -> None:
     if not isinstance(age_days, (int, float)) or isinstance(age_days, bool) or not math.isfinite(age_days) or age_days <= 0:
         raise TierError("cold age must be a positive finite number of days")
     protected_names = _protected_region_names(config)
+    trust_atime = _trust_filesystem_atime(config)
     manager = _make_manager(config)
-    manager.catalog_local_regions()
+    manager.catalog_local_regions(trust_atime=trust_atime)
     selected = manager.cold_regions(float(age_days) * 86_400)
     print(json.dumps([
         {"dimension": key.dimension, "region_x": key.x, "region_z": key.z}
@@ -227,8 +236,9 @@ def plan(args: argparse.Namespace) -> None:
             or not math.isfinite(age_days) or age_days <= 0):
         raise TierError("cold age must be a positive finite number of days")
     protected_names = _protected_region_names(config)
+    trust_atime = _trust_filesystem_atime(config)
     manager = _make_manager(config)
-    manager.catalog_local_regions()
+    manager.catalog_local_regions(trust_atime=trust_atime)
     remote_usage_bytes = manager.store.usage_snapshot()
     remote_quota_bytes = manager.store.max_bytes
     remote_available_bytes = max(0, remote_quota_bytes - remote_usage_bytes)
@@ -253,6 +263,7 @@ def plan(args: argparse.Namespace) -> None:
     result.update({
         "mode": "dry-run",
         "cold_age_days": age_days,
+        "filesystem_atime_trusted": trust_atime,
         "protected_regions": sorted(protected_names),
         "remote_usage_bytes": remote_usage_bytes,
         "remote_quota_bytes": remote_quota_bytes,
@@ -284,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
     offload_parser.add_argument("--region-z", required=True, type=int)
     offload_parser.set_defaults(handler=offload)
     catalog_parser = subparsers.add_parser(
-        "catalog", help="record local regions and initialize conservative access ages"
+        "catalog", help="record local regions and initialize access ages"
     )
     catalog_parser.add_argument("--config", required=True)
     catalog_parser.add_argument(

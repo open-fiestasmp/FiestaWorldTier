@@ -23,6 +23,17 @@ latency, outage recovery, concurrent player movement, and production-scale
 transfers still need testing. The project never scans, copies, or deletes the
 live Fiesta world.
 
+The latest isolated integration exercised Paper's actual idle scheduler, its
+leased offload API, Luna SFTP storage, and asynchronous demand restore. Paper
+selected one synthetic 8 KiB region as cold, offloaded it, and restored it when
+the chunk was requested. The restored SHA-256 matched the original, the durable
+marker cleared, Luna test usage returned to zero, and a tick monitor observed
+no gap above 500 ms. The asynchronous callback took 15.4 seconds, which is too
+slow for player-facing use and remains an optimization requirement. The test
+used an isolated world and a zero-byte free-space reserve only in its disposable
+configuration. No Fiesta world data was transferred. Crash/outage recovery,
+concurrent player movement, and production-scale transfer testing remain open.
+
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
 Use a server-side quota as a second limit where the host supports it. A sample
@@ -89,9 +100,12 @@ touch and later touches at the write interval are atomically published and
 synced; an unreadable access marker disables cold selection for that dimension.
 
 The catalog seeds existing local regions as hot when no history exists. Only
-use `--trust-atime` if the filesystem mount's access-time behavior has been
-verified. Candidate listing applies the configured `cold_age_days` (default
-30) and excludes entries in `protected_regions`, for example
+trust filesystem atime after verifying that the mount updates it reliably.
+`--trust-atime` applies to one `catalog` command; setting
+`trust_filesystem_atime: true` in the private config makes `catalog`,
+`candidates`, and the automatic scheduler's `plan` use verified atime history.
+The default is false. Candidate listing applies the configured
+`cold_age_days` (default 30) and excludes entries in `protected_regions`, for example
 `["overworld/r.0.0", "nether/r.3.-2"]`:
 
 ```sh
@@ -107,7 +121,8 @@ sizes, unmet amount, and a read-only advisory snapshot of Luna's current
 objects/staging usage; it constrains selection by reported quota headroom but
 does not move files. The snapshot is unlocked and can race another writer; each
 actual upload rechecks exact quota under the remote writer lock. Planning
-initializes local access metadata. Each actual offload still requires Paper's
+initializes local access metadata and reports whether verified filesystem
+atime was trusted. Each actual offload still requires Paper's
 region lease, a healthy tracker, and an old access timestamp. The companion
 Paper patch includes an opt-in idle scheduler that requests one oldest bundle
 per pass and rechecks the lease before each transfer; it is not installed on
