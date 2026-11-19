@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import shlex
 import stat
 import subprocess
@@ -14,17 +15,28 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterator, Mapping, Protocol
+from typing import Iterator, Mapping, Protocol, Sequence
 
 from .store import DirectoryObjectStore, RegionKey, TierError
 
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_BUNDLE_FILES = 4096
 
-class TransientSFTPError(TierError):
-    """An SFTP batch failed because its SSH transport timed out or disconnected."""
+
+class TransientTransferError(TierError):
+    """A transfer failed because its transport timed out or disconnected."""
 
     def __init__(self, message: str, *, retryable: bool = True):
         super().__init__(message)
         self.retryable = retryable
+
+
+class TransientSFTPError(TransientTransferError):
+    """An SFTP batch failed because its SSH transport timed out or disconnected."""
+
+
+class TransientSSHError(TransientTransferError):
+    """A streamed SSH transfer failed because its transport disconnected."""
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,10 @@ class SSHTransport(Protocol):
 
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]: ...
 
+    def stream_remote_files(
+        self, remote_paths: Sequence[str], targets: Sequence[tuple[Path, int | None]]
+    ) -> None: ...
+
 
 class OpenSSHTransport:
     """Small subprocess wrapper with strict host-key and batch-mode checks."""
@@ -166,6 +182,150 @@ class OpenSSHTransport:
         if result.returncode != 0:
             raise TierError(f"SFTP operation failed (exit {result.returncode})")
         return result
+
+    def stream_remote_files(
+        self, remote_paths: Sequence[str], targets: Sequence[tuple[Path, int | None]]
+    ) -> None:
+        """Stream concatenated remote files into private local staging files.
+
+        Each target has an exact byte length, except an optional final target
+        with a size of ``None``. That final manifest trailer is bounded so an
+        unexpected remote response cannot fill the local filesystem.
+        """
+        if not remote_paths or len(remote_paths) != len(targets):
+            raise TierError("SSH stream paths and targets do not match")
+        if any(size is None for _path, size in targets[:-1]):
+            raise TierError("only the final SSH stream target may have unknown size")
+        if any(size is not None and (type(size) is not int or size < 0) for _path, size in targets):
+            raise TierError("SSH stream target sizes must be nonnegative integers")
+
+        command = "cat -- " + " ".join(shlex.quote(path) for path in remote_paths)
+        process: subprocess.Popen[bytes] | None = None
+        deadline = time.monotonic() + self.config.timeout_seconds
+        try:
+            process = subprocess.Popen(
+                ["ssh", "-T", *self.options, self.target, command],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+            assert process.stdout is not None
+            fd = process.stdout.fileno()
+            os.set_blocking(fd, False)
+            selector = selectors.DefaultSelector()
+            selector.register(fd, selectors.EVENT_READ)
+            target_index = 0
+            target_remaining = targets[0][1]
+            total_unknown = 0
+            trailer_limit = MAX_MANIFEST_BYTES
+            open_target: object | None = None
+
+            def open_current():
+                nonlocal open_target
+                if open_target is None:
+                    path, _size = targets[target_index]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    open_target = path.open("xb")
+                return open_target
+
+            def advance_target() -> None:
+                nonlocal target_index, target_remaining, open_target
+                if open_target is not None:
+                    open_target.flush()
+                    os.fsync(open_target.fileno())
+                    open_target.close()
+                    open_target = None
+                target_index += 1
+                if target_index < len(targets):
+                    target_remaining = targets[target_index][1]
+
+            def advance_empty_targets() -> None:
+                while target_index < len(targets) - 1 and target_remaining == 0:
+                    open_current()
+                    advance_target()
+
+            advance_empty_targets()
+
+            while True:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    raise TimeoutError("SSH stream timed out")
+                events = selector.select(min(remaining_time, 1.0))
+                if not events:
+                    if process.poll() is not None:
+                        # Drain the pipe once after process exit; EOF is observed
+                        # by os.read on the next readiness notification.
+                        continue
+                    continue
+                chunk = os.read(fd, 64 * 1024)
+                if not chunk:
+                    break
+                offset = 0
+                while offset < len(chunk):
+                    advance_empty_targets()
+                    if target_index >= len(targets):
+                        raise TierError("SSH stream returned unexpected trailing data")
+                    if target_remaining is None:
+                        take = len(chunk) - offset
+                        total_unknown += take
+                        if total_unknown > trailer_limit:
+                            raise TierError("remote manifest exceeds the 1 MiB stream limit")
+                    else:
+                        take = min(len(chunk) - offset, target_remaining)
+                    sink = open_current()
+                    sink.write(chunk[offset:offset + take])
+                    offset += take
+                    if target_remaining is not None:
+                        target_remaining -= take
+                        if target_remaining == 0:
+                            advance_target()
+            if target_index < len(targets) - 1:
+                if target_remaining:
+                    raise TierError("SSH stream ended before a declared file was complete")
+                raise TierError("SSH stream ended before all declared files were received")
+            if target_index == len(targets) - 1:
+                if target_remaining is not None:
+                    raise TierError("SSH stream ended before a declared file was complete")
+                if open_target is None:
+                    open_current()
+                advance_target()
+            return_code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if return_code == 255:
+                raise TransientSSHError("SSH stream disconnected")
+            if return_code != 0:
+                raise TierError(f"SSH stream failed (exit {return_code})")
+        except TimeoutError as exc:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise TransientSSHError("SSH stream timed out", retryable=False) from exc
+        except subprocess.TimeoutExpired as exc:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise TransientSSHError("SSH stream timed out", retryable=False) from exc
+        except OSError as exc:
+            raise TransientSSHError("SSH stream process could not complete", retryable=False) from exc
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    process.stdout.close()
+            if 'selector' in locals():
+                selector.close()
+            if 'open_target' in locals() and open_target is not None:
+                open_target.close()
 
 
 class OpenSSHObjectStore:
@@ -336,6 +496,8 @@ class OpenSSHObjectStore:
         files = manifest.get("files")
         if not isinstance(files, dict) or f"region/r.{key.x}.{key.z}.mca" not in files:
             raise TierError(f"remote region bundle is incomplete for {key.name}")
+        if len(files) > MAX_BUNDLE_FILES:
+            raise TierError("remote region bundle has too many files")
         for member, info in files.items():
             if not DirectoryObjectStore._valid_member(key, member) or not isinstance(info, dict):
                 raise TierError(f"invalid remote bundle member: {member}")
@@ -350,9 +512,14 @@ class OpenSSHObjectStore:
     def _manifest_bytes(self, key: RegionKey) -> bytes:
         remote = shlex.quote(self._remote_path(self._manifest_path(key)))
         try:
-            result = self._ssh(f"cat -- {remote}")
-            return result.stdout.encode("utf-8")
-        except (TierError, UnicodeEncodeError) as exc:
+            # Read one byte beyond the limit so a hostile/corrupt remote
+            # manifest cannot make subprocess.run buffer an unbounded stdout.
+            result = self._ssh(f"head -c {MAX_MANIFEST_BYTES + 1} -- {remote}")
+            encoded = result.stdout.encode("utf-8")
+            if len(encoded) > MAX_MANIFEST_BYTES:
+                raise TierError("remote manifest exceeds the 1 MiB size limit")
+            return encoded
+        except (TierError, UnicodeError) as exc:
             raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
 
     def _manifest(self, key: RegionKey) -> tuple[dict, bytes]:
@@ -412,6 +579,8 @@ class OpenSSHObjectStore:
                     "files": manifest_files,
                 }
                 encoded = (json.dumps(generation, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                if len(encoded) > MAX_MANIFEST_BYTES or len(manifest_files) > MAX_BUNDLE_FILES:
+                    raise TierError("region bundle exceeds the supported manifest limits")
                 manifest_hash = hashlib.sha256(encoded).hexdigest()
                 total = sum(int(info["size"]) for info in manifest_files.values()) + len(encoded)
 
@@ -496,6 +665,8 @@ class OpenSSHObjectStore:
         expected_manifest_hash: str,
     ) -> dict:
         self._validate_manifest(key, manifest)
+        if sum(int(info["size"]) for info in manifest["files"].values()) > self.max_bytes:
+            raise TierError("remote bundle exceeds the configured storage quota")
         if destination.is_symlink():
             raise TierError(f"restore destination is a symlink: {destination}")
         destination.mkdir(parents=True, exist_ok=True)
@@ -513,27 +684,26 @@ class OpenSSHObjectStore:
                 raise TierError(f"restore destination already contains a file: {member}")
             final_targets.append((member, info, target))
 
-        last_transient_error: TransientSFTPError | None = None
+        last_transient_error: TransientTransferError | None = None
         for attempt in range(2):
             with tempfile.TemporaryDirectory(prefix=".fiesta-fetch-", dir=destination) as temporary:
                 attempt_root = Path(temporary)
-                batch: list[str] = []
                 staged_targets: list[tuple[str, dict, Path, Path]] = []
+                stream_paths: list[str] = []
+                stream_targets: list[tuple[Path, int | None]] = []
                 for member, info, final_target in final_targets:
                     relative = PurePosixPath(member)
                     staged_target = attempt_root.joinpath(*relative.parts)
                     staged_target.parent.mkdir(parents=True, exist_ok=True)
-                    batch.append(
-                        f"get {self._sftp_quote(object_path / relative)} {self._sftp_quote(staged_target)}"
-                    )
+                    stream_paths.append(self._remote_path(object_path / relative))
+                    stream_targets.append((staged_target, int(info["size"])))
                     staged_targets.append((member, info, staged_target, final_target))
                 manifest_after = attempt_root / "manifest.json"
-                batch.append(
-                    f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(manifest_after)}"
-                )
+                stream_paths.append(self._remote_path(self._manifest_path(key)))
+                stream_targets.append((manifest_after, None))
                 try:
-                    self._sftp(batch)
-                except TransientSFTPError as exc:
+                    self.transport.stream_remote_files(stream_paths, stream_targets)
+                except TransientTransferError as exc:
                     last_transient_error = exc
                     if attempt == 0 and exc.retryable:
                         time.sleep(0.25)
@@ -565,7 +735,7 @@ class OpenSSHObjectStore:
                     DirectoryObjectStore._fsync_dir(final_target.parent)
                 break
         else:
-            raise TierError("SFTP restore failed after a transient disconnect") from last_transient_error
+            raise TierError("SSH restore failed after a transient disconnect") from last_transient_error
         return manifest
 
     def delete(

@@ -11,8 +11,9 @@ opening it, and stop rather than generate a replacement if restore fails.
 
 The prototype models the durable transfer state machine and tests it against
 disposable worlds and a local object-store fixture. It includes an optional
-OpenSSH/SFTP adapter that requires a pinned host key and a restricted-permission
-identity file. Automated transport tests use a local fake. After the batched
+OpenSSH adapter that requires a pinned host key and a restricted-permission
+identity file. Uploads use SFTP; verified restores stream over SSH. Automated
+transport tests use a local fake. After the batched
 transport change, a disposable Paper 1.21.11 server restored a synthetic
 spawn-region bundle from Luna after `/forceload add` requested the marked
 chunk. The restored region SHA-256 matched the original, the durable marker
@@ -122,16 +123,31 @@ removed. One earlier multiplexed store attempt timed out while later complete
 transfers passed, so retry and outage behavior still need testing. Player-facing
 restore latency remains an open requirement.
 
-A cold-region fetch now retries once after an SSH disconnect (exit code 255).
-Each attempt downloads into a private temporary directory and publishes files
-only after the bundle and manifest verify. Timeouts and SFTP command errors are
-not retried; a failed restore leaves the recovery marker and remote bundle for a
-later attempt.
+A cold-region fetch now retries once after a transient SSH disconnect (exit
+code 255). Each attempt streams into a private temporary directory and
+publishes files only after the bundle and manifest verify. Local timeouts and
+other errors are not retried; a failed restore leaves the recovery marker and
+remote bundle for a later attempt.
 
 After this change, a real 1,048,607-byte synthetic Luna transfer completed in
 20.14 seconds for publish and 6.18 seconds for verified fetch. The restored
 SHA-256 matched, the remote object was deleted, and the unique test root was
 removed. This was a clean transfer with no retry needed.
+
+### Streamed restore measurement
+
+A disposable 4 MiB transfer benchmark on Luna measured warmed median times of
+4.291 seconds for SFTP and 1.365 seconds for `ssh cat`. The object store now
+streams concatenated bundle members over the pinned SSH connection, splits
+them using manifest-declared byte lengths, limits the trailing manifest to
+1 MiB, and retains per-file SHA-256 checks and private staging. SFTP remains
+the upload path because Luna rejected larger SFTP write packets.
+
+On 2026-11-19, the updated object-store fetch restored and verified a disposable
+4,390,912-byte three-file bundle from Luna in 2.437 seconds. All checksums
+matched; the disposable remote object was deleted and usage returned from 0 to
+0 bytes. This measures the storage API only, not a Paper callback or connected
+player. The player-facing restore latency gate remains open.
 
 ## Safety requirements
 

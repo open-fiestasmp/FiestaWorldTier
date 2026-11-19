@@ -178,6 +178,24 @@ chunk testing against Luna passed, with an 8.5-second restore. Automatic
 offloading remains disabled on Fiesta until restart/crash recovery, outage
 behavior, and player-facing movement/latency are tested on disposable copies.
 
+### Streamed object-store restore
+
+On 2026-11-19, a disposable 4 MiB transfer benchmark to Luna measured warmed
+median times of 4.291 seconds for SFTP and 1.365 seconds for `ssh cat`. The
+object-store restore path now streams the concatenated bundle members over the
+pinned SSH connection, splits them at manifest-declared byte lengths, caps the
+trailing manifest at 1 MiB, and verifies each file's size and SHA-256 before
+publishing it locally. Restore attempts still use a private staging directory;
+a transient SSH disconnect can retry once. Upload and upload verification
+remain on SFTP because Luna rejected larger SFTP write packets.
+
+A live Luna smoke test then restored a disposable 4,390,912-byte, three-file
+bundle in 2.437 seconds. All checksums matched, the test object was deleted,
+remote usage returned to its 0-byte baseline, and no Fiesta world data was
+read or changed. This is an object-store measurement, not a Paper callback or
+connected-player result. Demand restore remains unapproved for live world
+eviction until player-facing and crash/outage tests pass.
+
 The integration is intentionally fail-closed. If the marker, command,
 configuration, SSH host key, remote bundle, checksum, quota, or local disk
 reserve check fails, the operation returns an I/O error and leaves the world

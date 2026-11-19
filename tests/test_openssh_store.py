@@ -17,7 +17,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fiesta_world_tier import OpenSSHConfig, OpenSSHObjectStore, RegionKey, TierError, TierManager
-from fiesta_world_tier.openssh_store import OpenSSHTransport, TransientSFTPError
+from fiesta_world_tier.openssh_store import (
+    OpenSSHTransport,
+    TransientSFTPError,
+    TransientSSHError,
+)
 from fiesta_world_tier.store import RegionBundle
 
 
@@ -29,6 +33,7 @@ class FakeOpenSSH:
         self.root.mkdir()
         self.sftp_batches: list[str] = []
         self.ssh_commands: list[str] = []
+        self.stream_calls: list[tuple[list[str], list[tuple[Path, int | None]]]] = []
 
     def path(self, remote: str) -> Path:
         value = PurePosixPath(remote)
@@ -146,6 +151,9 @@ class FakeOpenSSH:
                     return self.result(0 if exists else 1)
                 elif args[0] == "cat":
                     output += self.path(args[-1]).read_text(encoding="utf-8")
+                elif args[0] == "head":
+                    limit = int(args[2])
+                    output += self.path(args[-1]).read_bytes()[:limit].decode("utf-8")
                 elif args[0] == "rmdir":
                     self.path(args[-1]).rmdir()
                 elif args[0] == "rm":
@@ -200,6 +208,27 @@ class FakeOpenSSH:
             raise TierError("fixture SFTP command failed") from exc
         return self.result()
 
+    def stream_remote_files(
+        self, remote_paths: list[str], targets: list[tuple[Path, int | None]]
+    ) -> None:
+        self.stream_calls.append((list(remote_paths), list(targets)))
+        payload = b"".join(self.path(remote).read_bytes() for remote in remote_paths)
+        offset = 0
+        for target, size in targets:
+            if size is None:
+                chunk = payload[offset:]
+                offset = len(payload)
+            else:
+                chunk = payload[offset:offset + size]
+                offset += len(chunk)
+                if len(chunk) != size:
+                    raise TierError("fixture stream was truncated")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as output:
+                output.write(chunk)
+        if offset != len(payload):
+            raise TierError("fixture stream returned trailing bytes")
+
 
 class CorruptingOpenSSH(FakeOpenSSH):
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
@@ -219,15 +248,15 @@ class DisconnectingOpenSSH(FakeOpenSSH):
         self.fail_fetch = False
         self.retryable = retryable
 
-    def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
-        is_fetch = self.fail_fetch and any(line.startswith("get ") for line in batch.splitlines())
-        result = super().run_sftp(batch)
-        if is_fetch and self.get_disconnects:
+    def stream_remote_files(
+        self, remote_paths: list[str], targets: list[tuple[Path, int | None]]
+    ) -> None:
+        super().stream_remote_files(remote_paths, targets)
+        if self.fail_fetch and self.get_disconnects:
             self.get_disconnects -= 1
-            raise TransientSFTPError(
-                "simulated SSH disconnect after partial batch", retryable=self.retryable
+            raise TransientSSHError(
+                "simulated SSH disconnect after partial stream", retryable=self.retryable
             )
-        return result
 
 
 class OpenSSHStoreTests(unittest.TestCase):
@@ -308,8 +337,8 @@ class OpenSSHStoreTests(unittest.TestCase):
             ),
             generation,
         )
-        self.assertEqual(len(self.transport.sftp_batches), 1)
-        self.assertIn("manifest.json", self.transport.sftp_batches[0])
+        self.assertEqual(len(self.transport.stream_calls), 1)
+        self.assertTrue(self.transport.stream_calls[0][0][-1].endswith("manifest.json"))
         for member, source in files.items():
             self.assertEqual((destination / member).read_bytes(), source.read_bytes())
 
@@ -323,7 +352,7 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertEqual(manifest, generation)
         self.assertEqual(manifest_hash, digest)
         self.assertEqual(self.transport.sftp_batches, [])
-        self.assertTrue(self.transport.ssh_commands[-1].startswith("cat -- "))
+        self.assertTrue(self.transport.ssh_commands[-1].startswith("head -c "))
 
     def test_fetch_retries_once_after_transient_disconnect_in_private_staging(self):
         transport = DisconnectingOpenSSH(self.root / "retry-remote", get_disconnects=1)
@@ -343,7 +372,7 @@ class OpenSSHStoreTests(unittest.TestCase):
             ),
             generation,
         )
-        self.assertEqual(len(transport.sftp_batches), 2)
+        self.assertEqual(len(transport.stream_calls), 2)
         for member, source in self.create_bundle().items():
             self.assertEqual((destination / member).read_bytes(), source.read_bytes())
         self.assertTrue(store._exists(store._object_path(self.key)))
@@ -356,7 +385,7 @@ class OpenSSHStoreTests(unittest.TestCase):
         transport.fail_fetch = True
         destination = self.root / "retry-twice-fetch"
 
-        with self.assertRaisesRegex(TransientSFTPError, "simulated SSH disconnect"):
+        with self.assertRaisesRegex(TransientSSHError, "simulated SSH disconnect"):
             store.fetch(
                 self.key,
                 destination,
@@ -378,7 +407,7 @@ class OpenSSHStoreTests(unittest.TestCase):
         transport.sftp_batches.clear()
         destination = self.root / "timeout-fetch"
 
-        with self.assertRaisesRegex(TransientSFTPError, "simulated SSH disconnect"):
+        with self.assertRaisesRegex(TransientSSHError, "simulated SSH disconnect"):
             store.fetch(
                 self.key,
                 destination,
@@ -387,7 +416,7 @@ class OpenSSHStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            sum(any(line.startswith("get ") for line in batch.splitlines()) for batch in transport.sftp_batches),
+            len(transport.stream_calls),
             1,
         )
         self.assertEqual(list(destination.iterdir()), [])
@@ -528,6 +557,80 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertNotIn("-B", upload_args)
         self.assertNotIn("-B", mixed_args)
 
+    def test_ssh_stream_splits_exact_file_lengths_and_manifest_trailer(self):
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        fake_ssh = fake_bin / "ssh"
+        fake_ssh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            "mode = os.environ.get('FIESTA_TEST_SSH_MODE', 'normal')\n"
+            "if mode == 'timeout': time.sleep(2)\n"
+            "elif mode == 'large': sys.stdout.buffer.write(b'x' * (1024 * 1024 + 1))\n"
+            "elif mode == 'truncated': sys.stdout.buffer.write(b'abc')\n"
+            "else: sys.stdout.buffer.write(b'abc{}')\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.exit(255 if mode == 'disconnect' else 0)\n",
+            encoding="utf-8",
+        )
+        fake_ssh.chmod(0o755)
+        transport = OpenSSHTransport(self.config)
+        empty = self.root / "stream-empty"
+        region = self.root / "stream-region"
+        manifest = self.root / "stream-manifest"
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}):
+            transport.stream_remote_files(
+                ["/remote/empty", "/remote/region", "/remote/manifest"],
+                [(empty, 0), (region, 3), (manifest, None)],
+            )
+        self.assertEqual(empty.read_bytes(), b"")
+        self.assertEqual(region.read_bytes(), b"abc")
+        self.assertEqual(manifest.read_bytes(), b"{}")
+
+    def test_ssh_stream_rejects_truncated_and_oversized_responses(self):
+        fake_bin = self.root / "stream-error-bin"
+        fake_bin.mkdir()
+        fake_ssh = fake_bin / "ssh"
+        fake_ssh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "mode = os.environ.get('FIESTA_TEST_SSH_MODE')\n"
+            "if mode == 'large': sys.stdout.buffer.write(b'x' * (1024 * 1024 + 1))\n"
+            "else: sys.stdout.buffer.write(b'abc')\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.exit(255 if mode == 'disconnect' else 0)\n",
+            encoding="utf-8",
+        )
+        fake_ssh.chmod(0o755)
+        transport = OpenSSHTransport(self.config)
+        output = self.root / "stream-error-output"
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FIESTA_TEST_SSH_MODE": "truncated"}):
+            with self.assertRaisesRegex(TierError, "ended before a declared file"):
+                transport.stream_remote_files(["/remote/a", "/remote/manifest"], [(output, 4), (self.root / "trailer", None)])
+        self.assertEqual(output.read_bytes(), b"abc")
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FIESTA_TEST_SSH_MODE": "large"}):
+            with self.assertRaisesRegex(TierError, "exceeds the 1 MiB stream limit"):
+                transport.stream_remote_files(["/remote/manifest"], [(self.root / "large-trailer", None)])
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FIESTA_TEST_SSH_MODE": "disconnect"}):
+            with self.assertRaisesRegex(TransientSSHError, "disconnected"):
+                transport.stream_remote_files(["/remote/manifest"], [(self.root / "disconnected", None)])
+
+    def test_ssh_stream_timeout_is_not_retried(self):
+        fake_bin = self.root / "stream-timeout-bin"
+        fake_bin.mkdir()
+        fake_ssh = fake_bin / "ssh"
+        fake_ssh.write_text(
+            "#!/usr/bin/env python3\nimport time\ntime.sleep(2)\n",
+            encoding="utf-8",
+        )
+        fake_ssh.chmod(0o755)
+        config = OpenSSHConfig(**{**self.config.__dict__, "timeout_seconds": 1})
+        transport = OpenSSHTransport(config)
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}):
+            with self.assertRaisesRegex(TransientSSHError, "timed out") as raised:
+                transport.stream_remote_files(["/remote/manifest"], [(self.root / "timeout", None)])
+        self.assertFalse(raised.exception.retryable)
+
     def test_config_rejects_unsupported_sftp_buffer_sizes(self):
         for value in (32767, 262145, True):
             with self.subTest(value=value):
@@ -612,7 +715,7 @@ class OpenSSHStoreTests(unittest.TestCase):
         files = self.create_bundle()
         self.store.publish(self.key, files)
         remote = self.transport.path(str(self.store._object_path(self.key) / "region/r.-2.5.mca"))
-        remote.write_bytes(b"corrupt")
+        remote.write_bytes(b"corrupt data")
         with self.assertRaisesRegex(TierError, "download verification failed"):
             self.store.verify(self.key)
 
