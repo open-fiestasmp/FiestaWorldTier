@@ -110,7 +110,10 @@ offload is not part of the initial rollout.
   implemented as a prototype.
 - Paper demand-restore seam with fail-closed marked recovery: implemented in
   the companion Paper 1.21.11 patch; not installed on Fiesta.
-- Automatic Paper unload/drain lease and safe local eviction: not implemented.
+- Paper region lease and explicit offload API with cross-process lock: implemented
+  experimentally in the companion patch; no automatic policy calls it yet.
+- Access-age tracking, cold-region selection, and automatic eviction scheduling:
+  not implemented.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and

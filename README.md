@@ -21,14 +21,14 @@ The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
 Use a server-side quota as a second limit where the host supports it. A sample
 deployment caps region objects at 90,000,000,000 bytes and leaves additional
-capacity for proxy and system data. The adapter is not connected to an automatic
-eviction caller. The companion Paper 1.21.11 patch provides marked demand
-restore and a per-region lease seam that waits for chunk I/O, checks for chunk
-holders and tickets, and closes cached region files. It has only been built in
-an isolated Paper checkout; it has not been exercised on a disposable server.
-Do not use the offload manager against a production world until a caller holds
-that lease across the complete transfer and journal lifecycle and the
-integration gates below pass.
+capacity for proxy and system data. The companion Paper 1.21.11 patch provides
+marked demand restore, per-region I/O leases, and an experimental
+`offloadRegion(...)` API that holds Paper's exclusive lease while the CLI
+uploads and evicts one region. The CLI also requires proof of Paper's
+cross-process lock; Java/Python lock interoperation was verified on Linux.
+There is no automatic cold-region selector or scheduler, and this integration
+has not been exercised on a disposable server. Do not offload a production
+world until the access-age policy and integration gates below pass.
 
 ## Safety requirements
 
@@ -73,7 +73,8 @@ operation.
 See [DESIGN.md](DESIGN.md), the
 [automatic hot/cold tiering roadmap](docs/automatic-tiering-roadmap.md), and
 the companion [Paper storage integration notes](docs/paper-storage-integration.md).
-The next milestone is a disposable integration server and an automatic tiering
-caller that uses the Paper lease. No files from production should be offloaded
-until crash recovery, concurrent reads/writes, player movement into a cold
-region, remote outage, quota exhaustion, and rollback all pass on copies.
+The next milestone is a disposable integration server, access-age tracking, and
+an automatic tiering policy that uses the Paper API. No files from production
+should be offloaded until crash recovery, concurrent reads/writes, player
+movement into a cold region, remote outage, quota exhaustion, and rollback all
+pass on copies.

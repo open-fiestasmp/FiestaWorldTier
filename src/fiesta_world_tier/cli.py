@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from .leases import FileRegionLease
 from .openssh_store import OpenSSHConfig, OpenSSHObjectStore
+from .paper_lease import paper_lease_is_held
 from .store import DIMENSION_KEYS, DIMENSION_ROOTS, RegionKey, TierError, TierManager
 
 
@@ -70,14 +71,7 @@ def _read_marker(dimension_root: Path, key: RegionKey, dimension_key: str) -> st
     return payload["manifest_sha256"]
 
 
-def restore(args: argparse.Namespace) -> None:
-    config_path = Path(args.config).absolute()
-    config = _private_json(config_path)
-    logical_dimension, dimension_root = _dimension_config(
-        config, args.dimension_key, Path(args.dimension_root)
-    )
-    key = RegionKey(logical_dimension, args.region_x, args.region_z)
-    expected_hash = _read_marker(dimension_root, key, args.dimension_key)
+def _make_manager(config: dict) -> TierManager:
     remote = config.get("remote")
     if not isinstance(remote, dict):
         raise TierError("configuration remote storage must be an object")
@@ -95,14 +89,34 @@ def restore(args: argparse.Namespace) -> None:
     store = OpenSSHObjectStore(store_config)
     server_root = Path(config["server_root"]).resolve(strict=True)
     lease = FileRegionLease(server_root)
-    manager = TierManager(
+    return TierManager(
         server_root,
         Path(config["journal"]),
         store,
         lease.acquire,
         local_free_reserve_bytes=int(config.get("local_free_reserve_bytes", 15 * 1024**3)),
     )
-    manager.restore(key, expected_manifest_hash=expected_hash)
+
+
+def offload(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    logical_dimension, dimension_root = _dimension_config(
+        config, args.dimension_key, Path(args.dimension_root)
+    )
+    key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    if not paper_lease_is_held(dimension_root, key):
+        raise TierError("refusing offload without Paper's exclusive region lease")
+    _make_manager(config).offload(key)
+
+
+def restore(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    logical_dimension, dimension_root = _dimension_config(
+        config, args.dimension_key, Path(args.dimension_root)
+    )
+    key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    expected_hash = _read_marker(dimension_root, key, args.dimension_key)
+    _make_manager(config).restore(key, expected_manifest_hash=expected_hash)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -115,6 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--region-x", required=True, type=int)
     restore_parser.add_argument("--region-z", required=True, type=int)
     restore_parser.set_defaults(handler=restore)
+    offload_parser = subparsers.add_parser(
+        "offload", help="offload a region while Paper holds its exclusive lease"
+    )
+    offload_parser.add_argument("--config", required=True)
+    offload_parser.add_argument("--dimension-key", required=True)
+    offload_parser.add_argument("--dimension-root", required=True)
+    offload_parser.add_argument("--region-x", required=True, type=int)
+    offload_parser.add_argument("--region-z", required=True, type=int)
+    offload_parser.set_defaults(handler=offload)
     return parser
 
 
