@@ -38,7 +38,7 @@ class RestoreCliTests(unittest.TestCase):
         marker_dir.mkdir(parents=True)
         marker = marker_dir / "r.-2.5.json"
         digest = "a" * 64
-        marker.write_text(json.dumps({
+        marker_payload = {
             "format": 1,
             "state": "REMOTE_ONLY",
             "dimension": "overworld",
@@ -46,9 +46,13 @@ class RestoreCliTests(unittest.TestCase):
             "x": -2,
             "z": 5,
             "manifest_sha256": digest,
-        }), encoding="utf-8")
+        }
         key = RegionKey("overworld", -2, 5)
-        self.assertEqual(_read_marker(self.world, key, "minecraft:overworld"), digest)
+        for state in ("REMOTE_ONLY", "EVICTING", "RESTORING"):
+            marker_payload["state"] = state
+            marker.write_text(json.dumps(marker_payload), encoding="utf-8")
+            with self.subTest(state=state):
+                self.assertEqual(_read_marker(self.world, key, "minecraft:overworld"), digest)
         with self.assertRaisesRegex(TierError, "identity or checksum"):
             _read_marker(self.world, key, "minecraft:the_nether")
 

@@ -62,7 +62,7 @@ def _read_marker(dimension_root: Path, key: RegionKey, dimension_key: str) -> st
     if (not isinstance(payload, dict) or payload.get("format") != 1
             or payload.get("dimension") != key.dimension
             or payload.get("dimension_key") != dimension_key
-            or payload.get("state") not in ("REMOTE_ONLY", "RESTORING")
+            or payload.get("state") not in ("REMOTE_ONLY", "EVICTING", "RESTORING")
             or type(payload.get("x")) is not int or payload["x"] != key.x
             or type(payload.get("z")) is not int or payload["z"] != key.z
             or not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("manifest_sha256", "")))):

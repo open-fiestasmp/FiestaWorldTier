@@ -222,6 +222,10 @@ class RegionTierTests(unittest.TestCase):
         original = self.local_contents()
         self.manager.offload(self.key)
         self.manager._set_state(self.key, "EVICTING")
+        marker = self.manager._marker_path(self.key)
+        marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+        marker_payload["state"] = "EVICTING"
+        marker.write_text(json.dumps(marker_payload), encoding="utf-8")
         (self.root / "world/region/r.-2.5.mca").write_bytes(b"partial local fragment")
         self.manager.recover(self.key)
         self.assertEqual(self.manager.state(self.key), "LOCAL_ONLY")

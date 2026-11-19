@@ -71,6 +71,13 @@ uses a unique immutable object generation and explicit states:
 
 `LOCAL_ONLY -> UPLOADING -> EVICTING -> REMOTE_ONLY -> RESTORING -> CACHED -> LOCAL_ONLY`
 
+The journal may still say `EVICTING` after a crash between publishing the
+verified remote bundle and completing local deletion. Recovery must verify the
+remote manifest, restore the complete bundle, and then reconcile the journal.
+The current writer records `REMOTE_ONLY` in the Paper marker at this point, but
+both restore paths also accept an `EVICTING` marker for interrupted or older
+protocol states. The CLI and Paper marker fixtures cover that state.
+
 Startup reconciliation must inspect both the journal and manifests. If the
 remote object is missing or has a checksum mismatch, stop world startup for the
 affected dimension and preserve every surviving copy for manual recovery. Never

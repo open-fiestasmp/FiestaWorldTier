@@ -481,7 +481,7 @@ class TierManager:
                 or payload.get("dimension_key") != DIMENSION_KEYS[key.dimension]
                 or type(payload.get("x")) is not int or payload.get("x") != key.x
                 or type(payload.get("z")) is not int or payload.get("z") != key.z
-                or payload.get("state") not in ("REMOTE_ONLY", "RESTORING")
+                or payload.get("state") not in ("REMOTE_ONLY", "EVICTING", "RESTORING")
                 or (manifest_hash is not None and payload.get("manifest_sha256") != manifest_hash)):
             raise TierError(f"world-tier marker identity or checksum mismatch: {marker}")
         marker.unlink()
@@ -502,7 +502,7 @@ class TierManager:
                 or type(payload.get("x")) is not int or payload.get("x") != key.x
                 or type(payload.get("z")) is not int or payload.get("z") != key.z
                 or (manifest_hash is not None and payload.get("manifest_sha256") != manifest_hash)
-                or payload.get("state") not in ("REMOTE_ONLY", "RESTORING")):
+                or payload.get("state") not in ("REMOTE_ONLY", "EVICTING", "RESTORING")):
             raise TierError(f"world-tier marker identity, state, or checksum mismatch: {marker}")
         payload["state"] = "RESTORING"
         encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
