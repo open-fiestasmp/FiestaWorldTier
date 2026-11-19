@@ -68,9 +68,10 @@ operation.
 
 ## Proposed production design
 
-See [DESIGN.md](DESIGN.md) and the companion
-[Paper storage integration notes](docs/paper-storage-integration.md). The next
-milestone is a disposable integration server and Paper-side unload/drain
-leases. No files from production should be offloaded until crash recovery,
-concurrent reads/writes, player movement into a cold region, remote outage,
-quota exhaustion, and rollback all pass on copies.
+See [DESIGN.md](DESIGN.md), the
+[automatic hot/cold tiering roadmap](docs/automatic-tiering-roadmap.md), and
+the companion [Paper storage integration notes](docs/paper-storage-integration.md).
+The next milestone is a disposable integration server and Paper-side
+unload/drain leases. No files from production should be offloaded until crash
+recovery, concurrent reads/writes, player movement into a cold region, remote
+outage, quota exhaustion, and rollback all pass on copies.
