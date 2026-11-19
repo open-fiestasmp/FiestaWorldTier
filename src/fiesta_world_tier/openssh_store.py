@@ -320,13 +320,12 @@ class OpenSSHObjectStore:
         return manifest
 
     def _manifest_bytes(self, key: RegionKey) -> bytes:
-        with tempfile.TemporaryDirectory(prefix="fiesta-tier-manifest-") as temporary:
-            local = Path(temporary) / "manifest.json"
-            self._sftp([f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(local)}"])
-            try:
-                return local.read_bytes()
-            except OSError as exc:
-                raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
+        remote = shlex.quote(self._remote_path(self._manifest_path(key)))
+        try:
+            result = self._ssh(f"cat -- {remote}")
+            return result.stdout.encode("utf-8")
+        except (TierError, UnicodeEncodeError) as exc:
+            raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
 
     def _manifest(self, key: RegionKey) -> tuple[dict, bytes]:
         try:
@@ -548,16 +547,22 @@ class OpenSSHObjectStore:
                     and hashlib.sha256(encoded).hexdigest() != expected_manifest_hash):
                 raise TierError(f"remote manifest changed before cleanup for {key.name}")
             object_path = self._object_path(key)
-            lines = [f"rm {self._sftp_quote(object_path / PurePosixPath(member))}" for member in sorted(manifest["files"])]
-            lines.append(f"rm {self._sftp_quote(object_path / 'manifest.json')}")
+            lines = [
+                f"rm -- {shlex.quote(self._remote_path(object_path / PurePosixPath(member)))}"
+                for member in sorted(manifest["files"])
+            ]
+            lines.append(f"rm -- {shlex.quote(self._remote_path(object_path / 'manifest.json'))}")
             directories = sorted(
                 {object_path / PurePosixPath(member).parent for member in manifest["files"] if PurePosixPath(member).parent != PurePosixPath(".")},
                 key=lambda path: len(path.parts),
                 reverse=True,
             )
-            lines.extend(f"rmdir {self._sftp_quote(path)}" for path in directories)
-            lines.append(f"rmdir {self._sftp_quote(object_path)}")
-            self._sftp(lines)
+            lines.extend(
+                f"rmdir -- {shlex.quote(self._remote_path(path))}"
+                for path in directories
+            )
+            lines.append(f"rmdir -- {shlex.quote(self._remote_path(object_path))}")
+            self._ssh(" && ".join(lines))
 
 
 __all__ = ["OpenSSHConfig", "OpenSSHObjectStore", "OpenSSHTransport", "SSHTransport"]

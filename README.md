@@ -34,6 +34,18 @@ used an isolated world and a zero-byte free-space reserve only in its disposable
 configuration. No Fiesta world data was transferred. Crash/outage recovery,
 concurrent player movement, and production-scale transfer testing remain open.
 
+A follow-up changed tiny manifest reads from SFTP downloads to stdout over the
+same pinned SSH connection. A real Luna smoke test with another synthetic
+8 KiB bundle measured 0.50 seconds for the manifest read, 5.40 seconds for the
+verified fetch, and 4.43 seconds for hash-guarded remote deletion. A second
+pass moved hash-guarded cleanup from SFTP to one SSH command under the remote
+writer lock; the real Luna smoke test then measured 0.50 seconds for the
+manifest read, 5.45 seconds for verified fetch, and 2.02 seconds for deletion.
+Both SHA-256 checks passed and both unique test roots were removed. The 7.97
+second total covers those store operations only, not the Paper callback, which
+has not been remeasured after these optimizations; 15.4 seconds remains the
+last measured end-to-end callback.
+
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
 Use a server-side quota as a second limit where the host supports it. A sample
@@ -142,9 +154,9 @@ python3 -m unittest discover -s tests -v
 
 The OpenSSH adapter requires Python 3.10 or later and the local `ssh` and
 `sftp` clients. Its remote account must have a pinned host key, a private key
-readable only by its owner, and permission to run `du`, `mkdir`, `chmod`,
-`test`, `rmdir`, and `rm` within a dedicated directory under that account's
-home. It does not use `sudo`. Keep the host, identity path, known-hosts path,
+readable only by its owner, and permission to run `cat`, `du`, `mkdir`,
+`chmod`, `test`, `rmdir`, and `rm` within a dedicated directory under that
+account's home. It does not use `sudo`. Keep the host, identity path, known-hosts path,
 control socket, and runtime configuration outside this repository. When
 enabled, SSH connection multiplexing uses a `%C` socket path in a private
 directory (mode `0700`) to avoid a new network handshake for every metadata

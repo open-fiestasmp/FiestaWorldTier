@@ -26,6 +26,7 @@ class FakeOpenSSH:
         self.root = root
         self.root.mkdir()
         self.sftp_batches: list[str] = []
+        self.ssh_commands: list[str] = []
 
     def path(self, remote: str) -> Path:
         value = PurePosixPath(remote)
@@ -38,6 +39,7 @@ class FakeOpenSSH:
         return subprocess.CompletedProcess([], code, output, error)
 
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        self.ssh_commands.append(command)
         output = ""
         if command.startswith("if [ -L "):
             checked = [shlex.split(value)[0] for value in re.findall(r"\[ -L (.*?) \]", command)]
@@ -90,6 +92,8 @@ class FakeOpenSSH:
                     candidate = self.path(args[-1])
                     exists = candidate.is_dir() if "-d" in args else candidate.exists()
                     return self.result(0 if exists else 1)
+                elif args[0] == "cat":
+                    output += self.path(args[-1]).read_text(encoding="utf-8")
                 elif args[0] == "rmdir":
                     self.path(args[-1]).rmdir()
                 elif args[0] == "rm":
@@ -229,7 +233,9 @@ class OpenSSHStoreTests(unittest.TestCase):
         for member, source in files.items():
             self.assertEqual((restored / member).read_bytes(), source.read_bytes())
 
+        self.transport.sftp_batches.clear()
         self.store.delete(self.key)
+        self.assertEqual(self.transport.sftp_batches, [])
         self.assertEqual(self.store.usage(), 0)
 
     def test_verified_fetch_batches_bundle_and_manifest_recheck(self):
@@ -254,6 +260,18 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertIn("manifest.json", self.transport.sftp_batches[0])
         for member, source in files.items():
             self.assertEqual((destination / member).read_bytes(), source.read_bytes())
+
+    def test_manifest_read_uses_ssh_stdout_instead_of_a_separate_sftp_transfer(self):
+        generation, digest = self.store.publish(self.key, self.create_bundle())
+        self.transport.sftp_batches.clear()
+        self.transport.ssh_commands.clear()
+
+        manifest, manifest_hash = self.store.read_manifest_with_hash(self.key)
+
+        self.assertEqual(manifest, generation)
+        self.assertEqual(manifest_hash, digest)
+        self.assertEqual(self.transport.sftp_batches, [])
+        self.assertTrue(self.transport.ssh_commands[-1].startswith("cat -- "))
 
     def test_fetch_retries_once_after_transient_disconnect_in_private_staging(self):
         transport = DisconnectingOpenSSH(self.root / "retry-remote", get_disconnects=1)
