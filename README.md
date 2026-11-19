@@ -14,9 +14,10 @@ disposable worlds and a local object-store fixture. It includes an optional
 OpenSSH/SFTP adapter that requires a pinned host key and a restricted-permission
 identity file. Automated transport tests use a local fake. After the batched
 transport change, a disposable Paper 1.21.11 server restored a synthetic
-spawn-region bundle from Luna on a forced chunk load. The restored region
-SHA-256 matched the original, the durable marker cleared, and the remote test
-object was consumed; the unique test root was then removed. This test used an
+spawn-region bundle from Luna after `/forceload add` requested the marked
+chunk. The restored region SHA-256 matched the original, the durable marker
+cleared, and the remote test object was consumed; the unique test root was
+then removed. This test used an
 isolated world and did not touch Fiesta world data. Player-facing restore
 latency, outage recovery, concurrent player movement, and production-scale
 transfers still need testing. The project never scans, copies, or deletes the
@@ -41,8 +42,8 @@ After the verified-fetch batching change, a separate 1,048,607-byte synthetic
 region bundle passed publish, manifest/hash read, verified fetch, and guarded
 delete against Luna with SSH multiplexing enabled. Measured times were 26.6 s,
 3.1 s, 9.4 s, and 9.0 s respectively; the unique remote test directory was
-removed and usage returned to zero. A later disposable Paper 1.21.11 forced
-chunk-load test exercised the patched restore hook with a synthetic spawn
+removed and usage returned to zero. A later disposable Paper 1.21.11
+`/forceload add` test exercised the patched restore hook with a synthetic spawn
 region; its checksum matched, the marker cleared, and the unique remote root was
 removed. One earlier multiplexed store attempt timed out while later complete
 transfers passed, so retry and outage behavior still need testing. Player-facing
