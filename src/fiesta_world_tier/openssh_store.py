@@ -280,15 +280,8 @@ class OpenSSHObjectStore:
         except ValueError as exc:
             raise TierError("remote storage usage response is invalid") from exc
 
-    def _manifest(self, key: RegionKey) -> tuple[dict, bytes]:
-        with tempfile.TemporaryDirectory(prefix="fiesta-tier-manifest-") as temporary:
-            local = Path(temporary) / "manifest.json"
-            self._sftp([f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(local)}"])
-            try:
-                encoded = local.read_bytes()
-                manifest = json.loads(encoded)
-            except (OSError, json.JSONDecodeError) as exc:
-                raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
+    @staticmethod
+    def _validate_manifest(key: RegionKey, manifest: object) -> dict:
         if not isinstance(manifest, dict) or manifest.get("format") != 1 or manifest.get("region") != {
             "dimension": key.dimension, "x": key.x, "z": key.z
         }:
@@ -305,22 +298,43 @@ class OpenSSHObjectStore:
                 raise TierError(f"invalid remote bundle size: {member}")
             if not re.fullmatch(r"[0-9a-f]{64}", str(info.get("sha256", ""))):
                 raise TierError(f"invalid remote bundle checksum: {member}")
-        return manifest, encoded
+        return manifest
+
+    def _manifest_bytes(self, key: RegionKey) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="fiesta-tier-manifest-") as temporary:
+            local = Path(temporary) / "manifest.json"
+            self._sftp([f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(local)}"])
+            try:
+                return local.read_bytes()
+            except OSError as exc:
+                raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
+
+    def _manifest(self, key: RegionKey) -> tuple[dict, bytes]:
+        try:
+            encoded = self._manifest_bytes(key)
+            manifest = json.loads(encoded)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
+        return self._validate_manifest(key, manifest), encoded
 
     def read_manifest(self, key: RegionKey) -> dict:
         return self._manifest(key)[0]
 
+    def read_manifest_with_hash(self, key: RegionKey) -> tuple[dict, str]:
+        manifest, encoded = self._manifest(key)
+        return manifest, hashlib.sha256(encoded).hexdigest()
+
     def manifest_hash(self, key: RegionKey) -> str:
-        return hashlib.sha256(self._manifest(key)[1]).hexdigest()
+        return hashlib.sha256(self._manifest_bytes(key)).hexdigest()
 
     def verify(self, key: RegionKey) -> dict:
         with self._lock, self._remote_writer_lock():
             return self._verify_unlocked(key)
 
     def _verify_unlocked(self, key: RegionKey) -> dict:
-        manifest, _encoded = self._manifest(key)
+        manifest, encoded = self._manifest(key)
         with tempfile.TemporaryDirectory(prefix="fiesta-tier-verify-") as temporary:
-            self._fetch_unlocked(key, Path(temporary))
+            self._fetch_unlocked(key, Path(temporary), manifest, hashlib.sha256(encoded).hexdigest())
         return manifest
 
     def publish(self, key: RegionKey, files: Mapping[str, Path]) -> tuple[dict, str]:
@@ -409,23 +423,57 @@ class OpenSSHObjectStore:
                         raise
                 return generation, manifest_hash
 
-    def fetch(self, key: RegionKey, destination: Path) -> dict:
+    def fetch(
+        self,
+        key: RegionKey,
+        destination: Path,
+        *,
+        expected_manifest: dict | None = None,
+        expected_manifest_hash: str | None = None,
+    ) -> dict:
+        if (expected_manifest is None) != (expected_manifest_hash is None):
+            raise TierError("expected manifest and hash must be supplied together")
         with self._lock, self._remote_writer_lock():
-            return self._fetch_unlocked(key, destination)
+            if expected_manifest is None:
+                manifest, encoded = self._manifest(key)
+                expected_manifest = manifest
+                expected_manifest_hash = hashlib.sha256(encoded).hexdigest()
+            else:
+                self._validate_manifest(key, expected_manifest)
+            return self._fetch_unlocked(key, destination, expected_manifest, expected_manifest_hash)
 
-    def _fetch_unlocked(self, key: RegionKey, destination: Path) -> dict:
-        manifest, _encoded = self._manifest(key)
+    def _fetch_unlocked(
+        self,
+        key: RegionKey,
+        destination: Path,
+        manifest: dict,
+        expected_manifest_hash: str,
+    ) -> dict:
+        self._validate_manifest(key, manifest)
         destination.mkdir(parents=True, exist_ok=True)
         object_path = self._object_path(key)
         batch: list[str] = []
         targets: list[tuple[str, dict, Path]] = []
-        for member, info in sorted(manifest["files"].items()):
-            relative = PurePosixPath(member)
-            target = destination.joinpath(*relative.parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            batch.append(f"get {self._sftp_quote(object_path / relative)} {self._sftp_quote(target)}")
-            targets.append((member, info, target))
-        self._sftp(batch)
+        with tempfile.TemporaryDirectory(prefix="fiesta-tier-fetch-manifest-") as temporary:
+            manifest_after = Path(temporary) / "manifest.json"
+            for member, info in sorted(manifest["files"].items()):
+                relative = PurePosixPath(member)
+                target = destination.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                batch.append(f"get {self._sftp_quote(object_path / relative)} {self._sftp_quote(target)}")
+                targets.append((member, info, target))
+            batch.append(
+                f"get {self._sftp_quote(self._manifest_path(key))} {self._sftp_quote(manifest_after)}"
+            )
+            self._sftp(batch)
+            try:
+                encoded_after = manifest_after.read_bytes()
+                after = json.loads(encoded_after)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise TierError(f"remote manifest changed during restore for {key.name}") from exc
+            if (hashlib.sha256(encoded_after).hexdigest() != expected_manifest_hash
+                    or after != manifest):
+                raise TierError(f"remote manifest changed during restore for {key.name}")
         for member, info, target in targets:
             if target.is_symlink() or not target.is_file():
                 raise TierError(f"downloaded bundle member is not a regular file: {member}")
@@ -435,9 +483,12 @@ class OpenSSHObjectStore:
                 os.fsync(file.fileno())
         return manifest
 
-    def delete(self, key: RegionKey) -> None:
+    def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None:
         with self._lock, self._remote_writer_lock():
-            manifest, _encoded = self._manifest(key)
+            manifest, encoded = self._manifest(key)
+            if (expected_manifest_hash is not None
+                    and hashlib.sha256(encoded).hexdigest() != expected_manifest_hash):
+                raise TierError(f"remote manifest changed before cleanup for {key.name}")
             object_path = self._object_path(key)
             lines = [f"rm {self._sftp_quote(object_path / PurePosixPath(member))}" for member in sorted(manifest["files"])]
             lines.append(f"rm {self._sftp_quote(object_path / 'manifest.json')}")

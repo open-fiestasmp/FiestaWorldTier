@@ -95,9 +95,17 @@ class BundleObjectStore(Protocol):
 
     def publish(self, key: RegionKey, files: Mapping[str, Path]) -> tuple[dict, str]: ...
     def read_manifest(self, key: RegionKey) -> dict: ...
+    def read_manifest_with_hash(self, key: RegionKey) -> tuple[dict, str]: ...
     def manifest_hash(self, key: RegionKey) -> str: ...
-    def fetch(self, key: RegionKey, destination: Path) -> dict: ...
-    def delete(self, key: RegionKey) -> None: ...
+    def fetch(
+        self,
+        key: RegionKey,
+        destination: Path,
+        *,
+        expected_manifest: dict | None = None,
+        expected_manifest_hash: str | None = None,
+    ) -> dict: ...
+    def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None: ...
 
     @staticmethod
     def _valid_member(key: RegionKey, member: str) -> bool: ...
@@ -223,16 +231,19 @@ class DirectoryObjectStore:
                 raise
 
     def read_manifest(self, key: RegionKey) -> dict:
+        return self.read_manifest_with_hash(key)[0]
+
+    def read_manifest_with_hash(self, key: RegionKey) -> tuple[dict, str]:
         try:
-            with self._manifest_path(key).open("r", encoding="utf-8") as source:
-                manifest = json.load(source)
+            encoded = self._manifest_path(key).read_bytes()
+            manifest = json.loads(encoded)
         except (OSError, json.JSONDecodeError) as exc:
             raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
-        if manifest.get("format") != 1 or manifest.get("region") != {
+        if not isinstance(manifest, dict) or manifest.get("format") != 1 or manifest.get("region") != {
             "dimension": key.dimension, "x": key.x, "z": key.z
         }:
             raise TierError(f"remote manifest identity mismatch for {key.name}")
-        return manifest
+        return manifest, hashlib.sha256(encoded).hexdigest()
 
     def manifest_hash(self, key: RegionKey) -> str:
         try:
@@ -255,8 +266,20 @@ class DirectoryObjectStore:
                 raise TierError(f"remote bundle checksum mismatch: {member}")
         return manifest
 
-    def fetch(self, key: RegionKey, destination: Path) -> dict:
-        manifest = self.read_manifest(key)
+    def fetch(
+        self,
+        key: RegionKey,
+        destination: Path,
+        *,
+        expected_manifest: dict | None = None,
+        expected_manifest_hash: str | None = None,
+    ) -> dict:
+        if (expected_manifest is None) != (expected_manifest_hash is None):
+            raise TierError("expected manifest and hash must be supplied together")
+        if expected_manifest is None:
+            manifest, manifest_hash = self.read_manifest_with_hash(key)
+        else:
+            manifest, manifest_hash = expected_manifest, expected_manifest_hash
         files = manifest.get("files")
         if not isinstance(files, dict) or f"region/r.{key.x}.{key.z}.mca" not in files:
             raise TierError(f"remote region bundle is incomplete for {key.name}")
@@ -277,12 +300,17 @@ class DirectoryObjectStore:
                 os.fsync(dst.fileno())
             if self._hash(target) != info["sha256"]:
                 raise TierError(f"download verification failed: {member}")
+        current_manifest, current_hash = self.read_manifest_with_hash(key)
+        if current_hash != manifest_hash or current_manifest != manifest:
+            raise TierError(f"remote manifest changed during restore for {key.name}")
         return manifest
 
-    def delete(self, key: RegionKey) -> None:
+    def delete(self, key: RegionKey, *, expected_manifest_hash: str | None = None) -> None:
         with self._lock:
             path = self._object_path(key)
             if path.exists():
+                if expected_manifest_hash is not None and self.manifest_hash(key) != expected_manifest_hash:
+                    raise TierError(f"remote manifest changed before cleanup for {key.name}")
                 shutil.rmtree(path)
                 self._fsync_dir(path.parent)
 
@@ -743,9 +771,20 @@ class TierManager:
                 if expected_manifest_hash is not None and journal_hash is not None and journal_hash != expected_manifest_hash:
                     raise TierError(f"marker manifest checksum does not match the journal for {key.name}")
                 expected_manifest_hash = expected_manifest_hash or journal_hash
-                if expected_manifest_hash and self.store.manifest_hash(key) != expected_manifest_hash:
+                try:
+                    manifest_before, manifest_hash_before = self.store.read_manifest_with_hash(key)
+                except TierError as exc:
+                    if expected_manifest_hash is not None:
+                        try:
+                            current_manifest_hash = self.store.manifest_hash(key)
+                        except TierError:
+                            raise exc
+                        if current_manifest_hash != expected_manifest_hash:
+                            raise TierError(f"remote manifest checksum mismatch for {key.name}") from exc
+                    raise
+                if expected_manifest_hash and manifest_hash_before != expected_manifest_hash:
                     raise TierError(f"remote manifest checksum mismatch for {key.name}")
-                manifest_before = self.store.read_manifest(key)
+                expected_manifest_hash = expected_manifest_hash or manifest_hash_before
                 files = manifest_before.get("files")
                 if not isinstance(files, dict) or not files:
                     raise TierError(f"remote region bundle is incomplete for {key.name}")
@@ -765,10 +804,13 @@ class TierManager:
                 stage_root.mkdir(parents=True, exist_ok=True)
                 stage = Path(tempfile.mkdtemp(prefix="restore-", dir=stage_root))
                 try:
-                    manifest = self.store.fetch(key, stage)
+                    manifest = self.store.fetch(
+                        key,
+                        stage,
+                        expected_manifest=manifest_before,
+                        expected_manifest_hash=expected_manifest_hash,
+                    )
                     if manifest != manifest_before:
-                        raise TierError(f"remote manifest changed during restore for {key.name}")
-                    if expected_manifest_hash and self.store.manifest_hash(key) != expected_manifest_hash:
                         raise TierError(f"remote manifest changed during restore for {key.name}")
                     if shutil.disk_usage(self.server_root).free < self.local_free_reserve_bytes:
                         raise TierError(f"local free-space reserve would be breached by restoring {key.name}")
@@ -788,7 +830,7 @@ class TierManager:
                     # copy, never a marker pointing at an already-deleted object.
                     self._remove_remote_marker(key, expected_manifest_hash)
                     self._set_state(key, "CACHED")
-                    self.store.delete(key)
+                    self.store.delete(key, expected_manifest_hash=expected_manifest_hash)
                     self._set_state(key, "LOCAL_ONLY")
                 finally:
                     if stage.exists():

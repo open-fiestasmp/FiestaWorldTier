@@ -25,6 +25,7 @@ class FakeOpenSSH:
     def __init__(self, root: Path):
         self.root = root
         self.root.mkdir()
+        self.sftp_batches: list[str] = []
 
     def path(self, remote: str) -> Path:
         value = PurePosixPath(remote)
@@ -110,6 +111,7 @@ class FakeOpenSSH:
         return result
 
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        self.sftp_batches.append(batch)
         try:
             for line in batch.splitlines():
                 args = shlex.split(line)
@@ -211,6 +213,39 @@ class OpenSSHStoreTests(unittest.TestCase):
 
         self.store.delete(self.key)
         self.assertEqual(self.store.usage(), 0)
+
+    def test_verified_fetch_batches_bundle_and_manifest_recheck(self):
+        files = self.create_bundle()
+        generation, digest = self.store.publish(self.key, files)
+        manifest, manifest_hash = self.store.read_manifest_with_hash(self.key)
+        self.assertEqual(manifest, generation)
+        self.assertEqual(manifest_hash, digest)
+
+        self.transport.sftp_batches.clear()
+        destination = self.root / "verified-fetch"
+        self.assertEqual(
+            self.store.fetch(
+                self.key,
+                destination,
+                expected_manifest=manifest,
+                expected_manifest_hash=digest,
+            ),
+            generation,
+        )
+        self.assertEqual(len(self.transport.sftp_batches), 1)
+        self.assertIn("manifest.json", self.transport.sftp_batches[0])
+        for member, source in files.items():
+            self.assertEqual((destination / member).read_bytes(), source.read_bytes())
+
+    def test_cleanup_refuses_a_manifest_changed_after_restore(self):
+        files = self.create_bundle()
+        _generation, digest = self.store.publish(self.key, files)
+        manifest_path = self.transport.path(str(self.store._manifest_path(self.key)))
+        manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+
+        with self.assertRaisesRegex(TierError, "manifest changed before cleanup"):
+            self.store.delete(self.key, expected_manifest_hash=digest)
+        self.assertTrue(self.transport.path(str(self.store._object_path(self.key) / "region/r.-2.5.mca")).is_file())
 
     def test_usage_snapshot_is_advisory_and_does_not_create_remote_directories(self):
         self.assertEqual(self.store.usage_snapshot(), 0)

@@ -30,10 +30,15 @@ class BrokenStore(DirectoryObjectStore):
 
 
 class MutatingManifestStore(DirectoryObjectStore):
-    def fetch(self, key, destination):
-        manifest = super().fetch(key, destination)
+    def fetch(self, key, destination, *, expected_manifest=None, expected_manifest_hash=None):
+        manifest = expected_manifest or self.read_manifest(key)
         self._manifest_path(key).write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-        return manifest
+        return super().fetch(
+            key,
+            destination,
+            expected_manifest=manifest,
+            expected_manifest_hash=expected_manifest_hash or self.manifest_hash(key),
+        )
 
 
 class RegionTierTests(unittest.TestCase):
