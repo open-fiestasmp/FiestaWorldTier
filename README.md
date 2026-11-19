@@ -34,6 +34,17 @@ Paper server; the access-age policy, player movement into cold regions, outage
 recovery, and crash/concurrency gates below still need to pass. Do not offload a
 production world until they do.
 
+After the verified-fetch batching change, a separate 1,048,607-byte synthetic
+region bundle passed publish, manifest/hash read, verified fetch, and guarded
+delete against Luna with SSH multiplexing enabled. Measured times were 26.6 s,
+3.1 s, 9.4 s, and 9.0 s respectively; the unique remote test directory was
+removed and usage returned to zero. One earlier multiplexed store attempt timed
+out, while a repeat completed, so the transport still needs retry and outage
+testing. This was a storage-adapter test, not a repeat of the Paper demand-load
+test: the earlier disposable Paper restore took about 27 seconds and triggered
+watchdog dumps. Repeating that Paper path after the batching change remains an
+open requirement.
+
 ## Safety requirements
 
 - Tier complete region bundles, not individual chunk NBT records. A bundle
