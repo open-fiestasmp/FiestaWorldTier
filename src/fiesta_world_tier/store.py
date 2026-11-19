@@ -1107,8 +1107,9 @@ class TierManager:
 
                 self._set_state(key, "EVICTING", manifest_hash)
                 self._write_remote_marker(key, manifest_hash)
-                # Production must retain the Paper region lease across upload,
-                # verification, and eviction so a reader cannot race this move.
+                # Legacy single-call path: the caller must retain Paper's
+                # region lease across upload and eviction. Paper's staged API
+                # uses snapshot/publish/finalize methods to release it in flight.
                 for path in files.values():
                     path.unlink()
                     self.store._fsync_dir(path.parent)

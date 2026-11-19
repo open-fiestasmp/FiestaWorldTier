@@ -23,19 +23,25 @@ latency, outage recovery, concurrent player movement, and production-scale
 transfers still need testing. The project never scans, copies, or deletes the
 live Fiesta world.
 
-The latest isolated integration exercised Paper's scheduler in idle mode, leased
-offload API, Luna SFTP storage, and asynchronous demand restore with a synthetic
-8 KiB region. The corrected probe used `generate=false`; the restored SHA-256
-matched, the durable marker cleared, Luna test usage returned to zero, and a
-tick monitor observed no gap above 500 ms. Its callback took 27.379 seconds and
-returned `null` because this synthetic region contained no actual chunk. This
-validates marker-driven file restoration, not loading a real chunk or the
-player experience. An attempted real-chunk fixture was not eligible for
-offload because Paper recorded access to its region during startup, so that
-path still needs a valid cold real-chunk test. The disposable run used a
-zero-byte free-space reserve; no Fiesta world data was transferred. Crash and
-outage recovery, concurrent player movement, and production-scale transfer
-testing remain open.
+An earlier isolated integration exercised Paper's idle scheduler, leased
+offload API, Luna SFTP storage, and demand restore with a synthetic 8 KiB
+region. Its `generate=false` callback took 27.379 seconds and returned `null`
+because the region contained no actual chunk. The checksum matched and the
+marker cleared, but that run only proved marker-driven file restoration. Its
+callback timing remains unexplained and is not a player-latency measurement.
+The disposable run used a zero-byte free-space reserve; no Fiesta data moved.
+
+A later disposable Paper 1.21.11 runtime test used saved chunks and a local
+directory-object-store fixture. During an 8-second staged upload, Paper loaded
+an existing diamond-block chunk; final validation canceled eviction, leaving
+the local region intact with no marker or published remote object. The maximum
+observed tick gap was 71 ms. A separate saved gold-block chunk completed
+offload and demand restore; Paper returned the existing chunk, the marker
+cleared, the local region was present, and the fixture's remote copy was
+removed. This validates the staged Paper access and saved-chunk restore paths
+against a local fixture. It does not test the Luna network, an actual player
+session, or player-facing latency. Crash/outage recovery and production-scale
+transfers remain open.
 
 A follow-up changed tiny manifest reads from SFTP downloads to stdout over the
 same pinned SSH connection. A real Luna smoke test with another synthetic
@@ -67,10 +73,11 @@ The companion Paper patch includes an opt-in scheduler with idle-only default
 and an online mode that checks up to eight candidates against Paper's region
 lease. If a player enters the candidate while its snapshot uploads, the final
 lease, access-age, and source checks cancel eviction and preserve the local
-region. The staged path passes Python lifecycle tests and a Paper compile, but
-the concurrent-player Paper integration test has not passed yet. Online mode
-is not installed or tested on Fiesta. Do not offload a production world until
-the remaining disposable-server gates below pass.
+region. The staged path passes Python lifecycle tests and a Paper compile. A
+disposable concurrent-access and saved-chunk restore test passed with a local
+directory-object-store fixture. Online mode is not installed or tested on
+Fiesta. Do not offload a production world until Luna-network, recovery, outage,
+and player-facing tests pass.
 
 After the verified-fetch batching change, a separate 1,048,607-byte synthetic
 region bundle passed publish, manifest/hash read, verified fetch, and guarded
