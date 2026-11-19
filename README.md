@@ -23,7 +23,7 @@ latency, outage recovery, concurrent player movement, and production-scale
 transfers still need testing. The project never scans, copies, or deletes the
 live Fiesta world.
 
-The latest isolated integration exercised Paper's idle scheduler, leased
+The latest isolated integration exercised Paper's scheduler in idle mode, leased
 offload API, Luna SFTP storage, and asynchronous demand restore with a synthetic
 8 KiB region. The corrected probe used `generate=false`; the restored SHA-256
 matched, the durable marker cleared, Luna test usage returned to zero, and a
@@ -59,8 +59,9 @@ marked demand restore, per-region I/O leases, and an experimental
 `offloadRegion(...)` API that holds Paper's exclusive lease while the CLI
 uploads and evicts one region. The CLI also requires proof of Paper's
 cross-process lock; Java/Python lock interoperation was verified on Linux.
-The companion Paper patch includes an opt-in idle scheduler, but it is not
-installed on Fiesta. The transfer cycle has been exercised on a disposable
+The companion Paper patch includes an opt-in scheduler with idle-only default
+and an online mode that checks up to eight candidates against Paper's region
+lease. Online mode is not installed or tested on Fiesta. The transfer cycle has been exercised on a disposable
 Paper server; the access-age policy, player movement into cold regions, outage
 recovery, and crash/concurrency gates below still need to pass. Do not offload a
 production world until they do.
@@ -140,9 +141,12 @@ actual upload rechecks exact quota under the remote writer lock. Planning
 initializes local access metadata and reports whether verified filesystem
 atime was trusted. Each actual offload still requires Paper's
 region lease, a healthy tracker, and an old access timestamp. The companion
-Paper patch includes an opt-in idle scheduler that requests one oldest bundle
-per pass and rechecks the lease before each transfer; it is not installed on
-Fiesta. Use `--max-selected 1` for a bounded one-region plan. Run the unit tests
+Paper patch includes an opt-in scheduler that can try multiple candidates per
+pass; online mode is gated by a JVM property and rechecks Paper's lease before
+each transfer. A player requesting the exact region being uploaded waits for
+the upload and then uses demand restore, so player-facing latency remains an
+open test. It is not installed on Fiesta. Use `--max-selected 1` for a bounded
+one-region plan. Run the unit tests
 with:
 
 `storage` reports the apparent size of Oracle's three world directories, Luna's

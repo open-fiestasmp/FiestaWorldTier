@@ -3,8 +3,9 @@
 This document describes the intended hybrid storage policy. It is a design and
 implementation checklist, not a claim that automatic eviction is available on
 Fiesta. The companion Paper patch supports marked demand restore, explicit
-leased offload, region access timestamps, and an opt-in idle scheduler. Python
-commands list age-based candidates and dry-run a local world-data budget plan.
+leased offload, region access timestamps, and an opt-in scheduler with a
+per-region online mode. Python commands list age-based candidates and dry-run a
+local world-data budget plan.
 A corrected disposable Paper probe passed marker-driven remote file restoration,
 but it used a synthetic region with no actual chunk. Its `generate=false`
 callback took 27.379 seconds and returned `null`; this is not evidence that a
@@ -118,20 +119,20 @@ offload is not part of the initial rollout.
 - Paper demand-restore seam with fail-closed marked recovery: implemented in
   the companion Paper 1.21.11 patch; not installed on Fiesta.
 - Paper region lease and explicit offload API with cross-process lock: implemented
-  experimentally in the companion patch; the opt-in idle scheduler now calls it
-  one region at a time when configured.
+  experimentally in the companion patch; the scheduler can try up to eight
+  candidates and optionally run while other regions are active.
 - Region I/O access timestamps, initial catalog, age-based candidate listing,
   and a dry-run planner for a configured local world-data target: implemented
   experimentally. The planner reads an unlocked remote-usage snapshot to cap
   its estimate; each actual upload rechecks quota under the remote writer lock.
-- Opt-in idle scheduler: implemented in the companion Paper patch, disabled by
-  default, and not installed on Fiesta. It plans one cold region per pass and
-  requires the main server to be empty before starting an offload. The tick,
-  Paper API handoff, real Luna upload, and synthetic marked-file restore passed
-  a disposable-server probe. Its callback took 27.379 seconds and returned
-  `null` because the fixture had no actual chunk. A real-chunk cold restore,
-  player movement latency, clean byte-level post-save comparison, crash
-  recovery, and outage behavior remain unverified.
+- Opt-in scheduler: implemented in the companion Paper patch, disabled by
+  default, and not installed on Fiesta. Online mode rejects loaded or ticketed
+  regions, but holds the exact target region's exclusive lease during transfer;
+  a player requesting that region waits for upload before its restore. The
+  scheduler's existing transfer probe used an idle server and a synthetic
+  region whose callback took 27.379 seconds and returned `null`. The online
+  path, a real-chunk cold restore, movement latency, clean byte-level post-save
+  comparison, crash recovery, and outage behavior remain unverified.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and
