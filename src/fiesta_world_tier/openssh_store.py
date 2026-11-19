@@ -53,6 +53,8 @@ class OpenSSHConfig:
         if any(part in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in root.parts[1:]):
             raise ValueError("remote_root may only contain simple path components")
         for label, path in (("identity file", self.identity_file), ("known_hosts", self.known_hosts)):
+            if not path.is_absolute():
+                raise ValueError(f"{label} path must be absolute")
             if path.is_symlink() or not path.is_file():
                 raise ValueError(f"{label} must be a regular file")
         mode = stat.S_IMODE(self.identity_file.stat().st_mode)

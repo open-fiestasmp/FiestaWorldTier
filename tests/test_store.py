@@ -86,13 +86,33 @@ class RegionTierTests(unittest.TestCase):
         self.manager.offload(self.key)
         self.assertEqual(self.manager.state(self.key), "REMOTE_ONLY")
         self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+        marker = self.root / "world/.world-tier/remote/r.-2.5.json"
+        marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(marker_payload["dimension_key"], "minecraft:overworld")
+        self.assertEqual(marker_payload["manifest_sha256"], self.store.manifest_hash(self.key))
         self.assertGreater(self.store.usage(), 0)
 
         self.manager.restore(self.key)
         self.assertEqual(self.manager.state(self.key), "LOCAL_ONLY")
         self.assertEqual(self.local_contents(), original)
         self.assertEqual(self.store.usage(), 0)
+        self.assertFalse(marker.exists())
         self.assertEqual(self.lease.calls, 2)
+
+    def test_paper_restore_can_recover_from_marker_after_journal_loss(self):
+        original = self.local_contents()
+        self.manager.offload(self.key)
+        marker = json.loads((self.root / "world/.world-tier/remote/r.-2.5.json").read_text(encoding="utf-8"))
+        new_manager = TierManager(
+            self.root,
+            Path(self.temp.name) / "replacement-journal.sqlite",
+            self.store,
+            self.lease.acquire,
+            local_free_reserve_bytes=0,
+        )
+        new_manager.restore(self.key, expected_manifest_hash=marker["manifest_sha256"])
+        self.assertEqual(self.local_contents(), original)
+        self.assertFalse((self.root / "world/.world-tier/remote/r.-2.5.json").exists())
 
     def test_catalog_seeds_existing_files_as_new_until_tracking_age_passes(self):
         self.assertEqual(self.manager.catalog_local_regions(when=100), 1)

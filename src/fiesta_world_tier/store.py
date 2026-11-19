@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,11 @@ DIMENSION_ROOTS = {
     "overworld": Path("world"),
     "nether": Path("world_nether/DIM-1"),
     "end": Path("world_the_end/DIM1"),
+}
+DIMENSION_KEYS = {
+    "overworld": "minecraft:overworld",
+    "nether": "minecraft:the_nether",
+    "end": "minecraft:the_end",
 }
 COMPONENTS = ("region", "entities", "poi")
 
@@ -412,6 +418,108 @@ class TierManager:
                   error=excluded.error""",
                 (key.dimension, key.x, key.z, state, time.time(), manifest_hash, error))
 
+    def _marker_path(self, key: RegionKey) -> Path:
+        dimension_root = self.server_root / DIMENSION_ROOTS[key.dimension]
+        if dimension_root.is_symlink() or not dimension_root.resolve().is_relative_to(self.server_root):
+            raise TierError(f"unsafe dimension root for marker: {key.dimension}")
+        marker = dimension_root / ".world-tier" / "remote" / f"r.{key.x}.{key.z}.json"
+        for directory in (marker.parent.parent, marker.parent):
+            if directory.is_symlink():
+                raise TierError(f"world-tier marker directory is a symlink: {directory}")
+            if directory.exists() and not directory.resolve().is_relative_to(dimension_root.resolve()):
+                raise TierError(f"world-tier marker directory escapes the dimension root: {directory}")
+        return marker
+
+    def _write_remote_marker(self, key: RegionKey, manifest_hash: str) -> None:
+        marker = self._marker_path(key)
+        marker_dir = marker.parent
+        for directory in (marker.parent.parent, marker_dir):
+            if directory.is_symlink():
+                raise TierError(f"world-tier marker directory is a symlink: {directory}")
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if not directory.is_dir() or directory.resolve().parent != directory.parent.resolve():
+                raise TierError(f"unsafe world-tier marker directory: {directory}")
+        payload = {
+            "format": 1,
+            "state": "REMOTE_ONLY",
+            "dimension": key.dimension,
+            "dimension_key": DIMENSION_KEYS[key.dimension],
+            "x": key.x,
+            "z": key.z,
+            "manifest_sha256": manifest_hash,
+        }
+        encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if marker.exists() or marker.is_symlink():
+            if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 4096 or marker.read_bytes() != encoded:
+                raise TierError(f"an unrelated or invalid world-tier marker already exists: {marker}")
+            return
+        temporary = marker.with_name(marker.name + ".tmp-" + uuid.uuid4().hex)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, marker)
+            DirectoryObjectStore._fsync_dir(marker_dir)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def _remove_remote_marker(self, key: RegionKey, manifest_hash: str | None) -> None:
+        marker = self._marker_path(key)
+        if not marker.exists() and not marker.is_symlink():
+            return
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 4096:
+            raise TierError(f"invalid world-tier marker: {marker}")
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TierError(f"invalid world-tier marker: {marker}") from exc
+        if (payload.get("format") != 1 or payload.get("dimension") != key.dimension
+                or payload.get("dimension_key") != DIMENSION_KEYS[key.dimension]
+                or type(payload.get("x")) is not int or payload.get("x") != key.x
+                or type(payload.get("z")) is not int or payload.get("z") != key.z
+                or payload.get("state") not in ("REMOTE_ONLY", "RESTORING")
+                or (manifest_hash is not None and payload.get("manifest_sha256") != manifest_hash)):
+            raise TierError(f"world-tier marker identity or checksum mismatch: {marker}")
+        marker.unlink()
+        DirectoryObjectStore._fsync_dir(marker.parent)
+
+    def _set_remote_marker_restoring(self, key: RegionKey, manifest_hash: str | None) -> None:
+        marker = self._marker_path(key)
+        if not marker.exists() and not marker.is_symlink():
+            return
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 4096:
+            raise TierError(f"invalid world-tier marker: {marker}")
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TierError(f"invalid world-tier marker: {marker}") from exc
+        if (payload.get("format") != 1 or payload.get("dimension") != key.dimension
+                or payload.get("dimension_key") != DIMENSION_KEYS[key.dimension]
+                or type(payload.get("x")) is not int or payload.get("x") != key.x
+                or type(payload.get("z")) is not int or payload.get("z") != key.z
+                or (manifest_hash is not None and payload.get("manifest_sha256") != manifest_hash)
+                or payload.get("state") not in ("REMOTE_ONLY", "RESTORING")):
+            raise TierError(f"world-tier marker identity, state, or checksum mismatch: {marker}")
+        payload["state"] = "RESTORING"
+        encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        temporary = marker.with_name(marker.name + ".tmp-" + uuid.uuid4().hex)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, marker)
+            DirectoryObjectStore._fsync_dir(marker.parent)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
     def offload(self, key: RegionKey) -> None:
         with self._operation_lock:
             with self.acquire_region_lease(key) as acquired:
@@ -427,6 +535,7 @@ class TierManager:
                     raise
 
                 self._set_state(key, "EVICTING", manifest_hash)
+                self._write_remote_marker(key, manifest_hash)
                 # Production must retain the Paper region lease across upload,
                 # verification, and eviction so a reader cannot race this move.
                 for path in files.values():
@@ -434,14 +543,17 @@ class TierManager:
                     self.store._fsync_dir(path.parent)
                 self._set_state(key, "REMOTE_ONLY", manifest_hash)
 
-    def restore(self, key: RegionKey) -> None:
+    def restore(self, key: RegionKey, expected_manifest_hash: str | None = None) -> None:
         with self._operation_lock:
             with self.acquire_region_lease(key) as acquired:
                 if not acquired:
                     raise TierError(f"region is busy; refusing restore: {key.name}")
-                if self.state(key) not in ("REMOTE_ONLY", "RESTORING", "EVICTING"):
+                if expected_manifest_hash is None and self.state(key) not in ("REMOTE_ONLY", "RESTORING", "EVICTING"):
                     return
-                expected_manifest_hash = self._stored_manifest_hash(key)
+                journal_hash = self._stored_manifest_hash(key)
+                if expected_manifest_hash is not None and journal_hash is not None and journal_hash != expected_manifest_hash:
+                    raise TierError(f"marker manifest checksum does not match the journal for {key.name}")
+                expected_manifest_hash = expected_manifest_hash or journal_hash
                 if expected_manifest_hash and self.store.manifest_hash(key) != expected_manifest_hash:
                     raise TierError(f"remote manifest checksum mismatch for {key.name}")
                 manifest_before = self.store.read_manifest(key)
@@ -459,6 +571,7 @@ class TierManager:
                 if shutil.disk_usage(self.server_root).free - required_bytes < self.local_free_reserve_bytes:
                     raise TierError(f"insufficient local free space to restore {key.name} safely")
                 self._set_state(key, "RESTORING")
+                self._set_remote_marker_restoring(key, expected_manifest_hash)
                 stage_root = self.server_root / ".world-tier-stage"
                 stage_root.mkdir(parents=True, exist_ok=True)
                 stage = Path(tempfile.mkdtemp(prefix="restore-", dir=stage_root))
@@ -481,7 +594,10 @@ class TierManager:
                         destination = root / relative
                         os.replace(staged_file, destination)
                         DirectoryObjectStore._fsync_dir(destination_dir)
-                    # Delete the remote copy only after every local member is published.
+                    # Keep the remote object until every local member is published.
+                    # Removing the marker first makes a crash leave an extra remote
+                    # copy, never a marker pointing at an already-deleted object.
+                    self._remove_remote_marker(key, expected_manifest_hash)
                     self._set_state(key, "CACHED")
                     self.store.delete(key)
                     self._set_state(key, "LOCAL_ONLY")

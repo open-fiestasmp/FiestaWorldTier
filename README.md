@@ -18,9 +18,11 @@ Luna. The project never scans, copies, or deletes the live Fiesta world.
 The prototype is designed to support a configurable hard quota. A sample
 deployment should cap world-region objects at 80,000,000,000 bytes and leave
 additional capacity for proxy and system data. The OpenSSH/SFTP adapter is not
-yet connected to a Paper storage hook, a live region lease, or automatic
-eviction. Do not use it against a production world until those pieces and
-crash-recovery tests are complete.
+connected to a live eviction lease or automatic eviction. The companion Paper
+1.21.11 patch now provides a marked demand-restore seam, but that code has only
+been built in an isolated Paper checkout and has not been exercised on a
+disposable server. Do not use it against a production world until Paper-side
+unload/drain leases and integration tests are complete.
 
 ## Safety requirements
 
@@ -43,8 +45,7 @@ crash-recovery tests are complete.
 ## Prototype
 
 `src/fiesta_world_tier/` contains the manifest, local fixture store, pinned
-OpenSSH/SFTP store, journal, and region bundle mover. It is intentionally not
-wired to Paper. Run its unit tests with:
+OpenSSH/SFTP store, journal, marker lifecycle, and restore command. Run its unit tests with:
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -60,7 +61,9 @@ transport and do not establish a connection to Luna.
 
 ## Proposed production design
 
-See [DESIGN.md](DESIGN.md). The next milestone is a Paper 1.21.11 storage-layer
-patch and a disposable integration server. No files from production should be
-offloaded until crash recovery, concurrent reads/writes, player movement into a
-cold region, remote outage, quota exhaustion, and rollback all pass on copies.
+See [DESIGN.md](DESIGN.md) and the companion
+[Paper storage integration notes](docs/paper-storage-integration.md). The next
+milestone is a disposable integration server and Paper-side unload/drain
+leases. No files from production should be offloaded until crash recovery,
+concurrent reads/writes, player movement into a cold region, remote outage,
+quota exhaustion, and rollback all pass on copies.
