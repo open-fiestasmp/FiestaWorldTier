@@ -318,5 +318,63 @@ class PaperLeaseCliTests(unittest.TestCase):
         self.assertTrue(payload["remote_usage_snapshot_is_advisory"])
 
 
+class StorageCliTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.server_root = Path(self.temp.name) / "server"
+        self.server_root.mkdir()
+        for name in ("world", "world_nether", "world_the_end"):
+            root = self.server_root / name
+            root.mkdir()
+            (root / "region.dat").write_bytes(name.encode("ascii"))
+        self.config = Path(self.temp.name) / "tier-config.json"
+        self.config.write_text(json.dumps({"server_root": str(self.server_root)}), encoding="utf-8")
+        self.config.chmod(0o600)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_storage_command_reports_local_remote_and_combined_bytes_read_only(self):
+        from fiesta_world_tier.cli import build_parser, storage
+
+        class FakeStore:
+            max_bytes = 1000
+
+            @staticmethod
+            def usage_snapshot():
+                return 300
+
+        manager = type("FakeManager", (), {"store": FakeStore()})()
+        args = build_parser().parse_args(["storage", "--config", str(self.config)])
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager", return_value=manager):
+            with redirect_stdout(output):
+                storage(args)
+
+        payload = json.loads(output.getvalue())
+        self.assertGreaterEqual(payload["local_world_bytes"], sum(
+            len(name.encode("ascii")) for name in ("world", "world_nether", "world_the_end")
+        ))
+        self.assertEqual(payload["remote_tier_store_bytes"], 300)
+        self.assertEqual(
+            payload["combined_world_storage_bytes"], payload["local_world_bytes"] + 300
+        )
+        self.assertEqual(payload["remote_quota_bytes"], 1000)
+        self.assertEqual(payload["remote_available_bytes"], 700)
+        self.assertTrue(payload["remote_usage_includes_staging"])
+        self.assertTrue(payload["remote_usage_snapshot_is_advisory"])
+        self.assertFalse(payload["mutated_world_or_remote_data"])
+
+    def test_storage_command_fails_closed_for_missing_world_root(self):
+        from fiesta_world_tier.cli import build_parser, storage
+
+        end_root = self.server_root / "world_the_end"
+        (end_root / "region.dat").unlink()
+        end_root.rmdir()
+        args = build_parser().parse_args(["storage", "--config", str(self.config)])
+        with self.assertRaisesRegex(TierError, "missing or unsafe"):
+            storage(args)
+
+
 if __name__ == "__main__":
     unittest.main()

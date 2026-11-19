@@ -5,6 +5,7 @@ import json
 import math
 import re
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,9 @@ from .leases import FileRegionLease
 from .openssh_store import OpenSSHConfig, OpenSSHObjectStore
 from .paper_lease import paper_lease_is_held
 from .store import DIMENSION_KEYS, DIMENSION_ROOTS, RegionKey, TierError, TierManager
+
+
+WORLD_STORAGE_ROOTS = ("world", "world_nether", "world_the_end")
 
 
 def _private_json(path: Path) -> dict:
@@ -148,6 +152,52 @@ def catalog(args: argparse.Namespace) -> None:
     print(json.dumps({"cataloged_local_regions": count}, separators=(",", ":")))
 
 
+def storage(args: argparse.Namespace) -> None:
+    """Report local world bytes and remote tier-store usage without changing either."""
+    config = _private_json(Path(args.config).absolute())
+    configured_root = Path(config["server_root"])
+    if configured_root.is_symlink():
+        raise TierError("configured server root must not be a symlink")
+    server_root = configured_root.resolve(strict=True)
+    if not server_root.is_dir():
+        raise TierError("configured server root is not a safe directory")
+
+    world_roots = [server_root / relative for relative in WORLD_STORAGE_ROOTS]
+    for root in world_roots:
+        if root.is_symlink() or not root.is_dir():
+            raise TierError(f"configured world storage root is missing or unsafe: {root.name}")
+    result = subprocess.run(
+        ["du", "-sb", "--", *(str(root) for root in world_roots)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    if result.returncode != 0:
+        raise TierError("could not measure local world storage")
+    try:
+        measurements = [int(line.split(maxsplit=1)[0]) for line in result.stdout.splitlines()]
+    except (IndexError, ValueError) as exc:
+        raise TierError("local world storage measurement is invalid") from exc
+    if len(measurements) != len(world_roots):
+        raise TierError("local world storage measurement is incomplete")
+    local_world_bytes = sum(measurements)
+
+    store = _make_manager(config).store
+    remote_bytes = store.usage_snapshot()
+    remote_quota_bytes = store.max_bytes
+    print(json.dumps({
+        "local_world_bytes": local_world_bytes,
+        "remote_tier_store_bytes": remote_bytes,
+        "combined_world_storage_bytes": local_world_bytes + remote_bytes,
+        "remote_quota_bytes": remote_quota_bytes,
+        "remote_available_bytes": max(0, remote_quota_bytes - remote_bytes),
+        "remote_usage_includes_staging": True,
+        "remote_usage_snapshot_is_advisory": True,
+        "mutated_world_or_remote_data": False,
+    }, separators=(",", ":")))
+
+
 def candidates(args: argparse.Namespace) -> None:
     config = _private_json(Path(args.config).absolute())
     age_days = config.get("cold_age_days", 30) if args.age_days is None else args.age_days
@@ -242,6 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="use filesystem access times only when the mount has verified atime semantics",
     )
     catalog_parser.set_defaults(handler=catalog)
+    storage_parser = subparsers.add_parser(
+        "storage", help="report local world bytes and remote tier-store usage"
+    )
+    storage_parser.add_argument("--config", required=True)
+    storage_parser.set_defaults(handler=storage)
     candidates_parser = subparsers.add_parser(
         "candidates", help="print regions older than the configured cold-age threshold"
     )

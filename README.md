@@ -98,6 +98,7 @@ verified. Candidate listing applies the configured `cold_age_days` (default
 fiesta-world-tier catalog --config /etc/fiesta-world-tier/config.json
 fiesta-world-tier candidates --config /etc/fiesta-world-tier/config.json
 fiesta-world-tier plan --config /etc/fiesta-world-tier/config.json
+fiesta-world-tier storage --config /etc/fiesta-world-tier/config.json
 ```
 
 The budget planner selects oldest cold local bundles until the configured
@@ -112,6 +113,13 @@ Paper patch includes an opt-in idle scheduler that requests one oldest bundle
 per pass and rechecks the lease before each transfer; it is not installed on
 Fiesta. Use `--max-selected 1` for a bounded one-region plan. Run the unit tests
 with:
+
+`storage` reports the apparent size of Oracle's three world directories, Luna's
+dedicated tier objects and staging directories, the combined byte count, and
+the configured remote quota/headroom. It does not write to either side. Luna's
+measurement is an unlocked advisory snapshot and may race an upload or restore;
+do not use it alone as a hard quota check. It is a reporting command, not a
+5-second Chunky guard integration.
 
 ```sh
 python3 -m unittest discover -s tests -v
