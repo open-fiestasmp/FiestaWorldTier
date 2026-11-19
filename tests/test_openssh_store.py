@@ -143,6 +143,7 @@ class OpenSSHStoreTests(unittest.TestCase):
         identity.chmod(0o600)
         known_hosts = self.root / "known_hosts"
         known_hosts.write_text("fixture host key pin\n", encoding="utf-8")
+        control_path = self.root / "control-%C"
         self.config = OpenSSHConfig(
             host="example.invalid",
             username="fiesta",
@@ -151,6 +152,7 @@ class OpenSSHStoreTests(unittest.TestCase):
             known_hosts=known_hosts,
             remote_root=PurePosixPath("/home/fiesta/.local/share/fiesta-world-tier"),
             max_bytes=1_000_000,
+            control_path=control_path,
         )
         self.transport = FakeOpenSSH(self.root / "remote")
         self.store = OpenSSHObjectStore(self.config, self.transport)
@@ -200,6 +202,16 @@ class OpenSSHStoreTests(unittest.TestCase):
             transport.run_sftp("pwd\n")
         arguments = run.call_args.args[0]
         self.assertEqual(arguments[:5], ["sftp", "-b", "-", "-P", str(self.config.port)])
+
+    def test_transport_enables_private_connection_multiplexing(self):
+        transport = OpenSSHTransport(self.config)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed) as run:
+            transport.run_ssh("true")
+        arguments = run.call_args.args[0]
+        self.assertIn("ControlMaster=auto", arguments)
+        self.assertIn("ControlPersist=30", arguments)
+        self.assertIn(f"ControlPath={self.config.control_path}", arguments)
 
     def test_journaled_manager_can_offload_and_restore_over_sftp_fixture(self):
         server = self.root / "world-server"
@@ -274,6 +286,13 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.config.identity_file.chmod(0o644)
         with self.assertRaisesRegex(ValueError, "permissions"):
             self.config.validate()
+
+    def test_config_rejects_insecure_control_socket_directory(self):
+        directory = self.root / "shared"
+        directory.mkdir(mode=0o755)
+        control_path = directory / "control-%C"
+        with self.assertRaisesRegex(ValueError, "control_path parent permissions"):
+            OpenSSHConfig(**{**self.config.__dict__, "control_path": control_path}).validate()
 
 
 if __name__ == "__main__":

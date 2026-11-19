@@ -12,13 +12,17 @@ opening it, and stop rather than generate a replacement if restore fails.
 The prototype models the durable transfer state machine and tests it against
 disposable worlds and a local object-store fixture. It includes an optional
 OpenSSH/SFTP adapter that requires a pinned host key and a restricted-permission
-identity file; its transport tests use a local fake and have not been run against
-Luna. The project never scans, copies, or deletes the live Fiesta world.
+identity file. The automated transport tests use a local fake; a separate
+synthetic publish/verify/fetch/delete smoke test has passed against Luna without
+using world data. The project never scans, copies, or deletes the live Fiesta
+world.
 
-The prototype is designed to support a configurable hard quota. A sample
-deployment should cap world-region objects at 80,000,000,000 bytes and leave
-additional capacity for proxy and system data. The OpenSSH/SFTP adapter is not
-connected to a live eviction lease or automatic eviction. The companion Paper
+The OpenSSH adapter enforces a configured application byte cap across its
+objects and staging directories; this is not an OS-level filesystem quota.
+Use a server-side quota as a second limit where the host supports it. A sample
+deployment caps region objects at 90,000,000,000 bytes and leaves additional
+capacity for proxy and system data. The adapter is not connected to a live
+eviction lease or automatic eviction. The companion Paper
 1.21.11 patch now provides a marked demand-restore seam, but that code has only
 been built in an isolated Paper checkout and has not been exercised on a
 disposable server. Do not use it against a production world until Paper-side
@@ -37,8 +41,9 @@ unload/drain leases and integration tests are complete.
 - Restore and verify a complete bundle before Paper is allowed to open it. A
   failed or partial restore must block that region; it must never look like a
   new empty region.
-- Bound Luna storage with a hard byte quota. Keep credentials outside this
-  repository and transfer only region data over SSH.
+- Bound world-tier objects with an application byte cap and enforce a separate
+  server-side quota where available. Keep credentials outside this repository
+  and transfer only region data over SSH.
 - Keep the remote copy until a verified local restore is complete. Recover
   interrupted transactions from the journal before accepting chunk I/O.
 
@@ -56,8 +61,10 @@ The OpenSSH adapter requires Python 3.10 or later and the local `ssh` and
 readable only by its owner, and permission to run `du`, `mkdir`, `chmod`,
 `test`, `rmdir`, and `rm` within a dedicated directory under that account's
 home. It does not use `sudo`. Keep the host, identity path, known-hosts path,
-and any runtime configuration outside this repository. Its tests use a fake
-transport and do not establish a connection to Luna.
+control socket, and runtime configuration outside this repository. When
+enabled, SSH connection multiplexing uses a `%C` socket path in a private
+directory (mode `0700`) to avoid a new network handshake for every metadata
+operation.
 
 ## Proposed production design
 

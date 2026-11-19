@@ -34,6 +34,7 @@ class OpenSSHConfig:
     known_hosts: Path
     remote_root: PurePosixPath
     max_bytes: int
+    control_path: Path | None = None
     timeout_seconds: int = 900
     lock_timeout_seconds: int = 30
 
@@ -60,6 +61,19 @@ class OpenSSHConfig:
         mode = stat.S_IMODE(self.identity_file.stat().st_mode)
         if mode & 0o077:
             raise ValueError("identity file permissions must exclude group and other access")
+        if self.control_path is not None:
+            if not self.control_path.is_absolute() or self.control_path.name.count("%C") != 1:
+                raise ValueError("control_path must be absolute and contain exactly one %C token")
+            if "\n" in str(self.control_path) or "\r" in str(self.control_path) or "\x00" in str(self.control_path):
+                raise ValueError("control_path contains an invalid character")
+            if self.control_path.parent.is_symlink() or not self.control_path.parent.is_dir():
+                raise ValueError("control_path parent must be an existing private directory")
+            control_dir = self.control_path.parent.stat()
+            if control_dir.st_uid != os.geteuid():
+                raise ValueError("control_path parent must be owned by the current user")
+            control_dir_mode = stat.S_IMODE(control_dir.st_mode)
+            if control_dir_mode & 0o077:
+                raise ValueError("control_path parent permissions must exclude group and other access")
 
 
 class SSHTransport(Protocol):
@@ -85,6 +99,12 @@ class OpenSSHTransport:
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3",
         ]
+        if config.control_path is not None:
+            self.options.extend([
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPersist=30",
+                "-o", f"ControlPath={config.control_path}",
+            ])
 
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(

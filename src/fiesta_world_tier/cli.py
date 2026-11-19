@@ -89,6 +89,7 @@ def restore(args: argparse.Namespace) -> None:
         known_hosts=Path(remote["known_hosts"]),
         remote_root=PurePosixPath(remote["remote_root"]),
         max_bytes=int(remote["max_bytes"]),
+        control_path=Path(remote["control_path"]) if remote.get("control_path") else None,
         timeout_seconds=int(remote.get("timeout_seconds", 900)),
     )
     store = OpenSSHObjectStore(store_config)
