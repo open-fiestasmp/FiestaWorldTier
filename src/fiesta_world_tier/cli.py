@@ -164,6 +164,48 @@ def candidates(args: argparse.Namespace) -> None:
     ], separators=(",", ":")))
 
 
+def plan(args: argparse.Namespace) -> None:
+    """Print a size-budget selection without invoking Paper or moving data."""
+    config = _private_json(Path(args.config).absolute())
+    target_bytes = args.target_bytes
+    if target_bytes is None:
+        target_bytes = config.get("local_world_data_budget_bytes")
+    if type(target_bytes) is not int or target_bytes < 0:
+        raise TierError("set local_world_data_budget_bytes or pass --target-bytes as a non-negative integer")
+    age_days = config.get("cold_age_days", 30)
+    if (not isinstance(age_days, (int, float)) or isinstance(age_days, bool)
+            or not math.isfinite(age_days) or age_days <= 0):
+        raise TierError("cold age must be a positive finite number of days")
+    protected_names = _protected_region_names(config)
+    manager = _make_manager(config)
+    manager.catalog_local_regions()
+    result = manager.plan_local_budget(
+        target_bytes, float(age_days) * 86_400, protected_names
+    )
+    remote = config.get("remote")
+    remote_quota_bytes = remote.get("max_bytes") if isinstance(remote, dict) else None
+    result["selected"] = [
+        {
+            "dimension": item["key"].dimension,
+            "region_x": item["key"].x,
+            "region_z": item["key"].z,
+            "bytes": item["bytes"],
+            "last_access": item["last_access"],
+        }
+        for item in result["selected"]
+    ]
+    result.update({
+        "mode": "dry-run",
+        "cold_age_days": age_days,
+        "protected_regions": sorted(protected_names),
+        "remote_quota_bytes": remote_quota_bytes,
+        "remote_usage_measured": False,
+        "requires_paper_region_lease_before_each_offload": True,
+        "automatic_eviction_enabled": False,
+    })
+    print(json.dumps(result, separators=(",", ":")))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fiesta-world-tier")
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -198,6 +240,12 @@ def build_parser() -> argparse.ArgumentParser:
     candidates_parser.add_argument("--config", required=True)
     candidates_parser.add_argument("--age-days", type=float)
     candidates_parser.set_defaults(handler=candidates)
+    plan_parser = subparsers.add_parser(
+        "plan", help="dry-run a cold-region selection to approach the local world-data budget"
+    )
+    plan_parser.add_argument("--config", required=True)
+    plan_parser.add_argument("--target-bytes", type=int)
+    plan_parser.set_defaults(handler=plan)
     return parser
 
 

@@ -257,6 +257,55 @@ class PaperLeaseCliTests(unittest.TestCase):
             with self.assertRaisesRegex(TierError, "protected_regions"):
                 candidates(args)
 
+    def test_plan_command_serializes_budget_selection_as_dry_run(self):
+        from fiesta_world_tier.cli import build_parser, plan
+
+        class FakeManager:
+            def __init__(self):
+                self.catalog_calls = 0
+                self.arguments = None
+
+            def catalog_local_regions(self):
+                self.catalog_calls += 1
+
+            def plan_local_budget(self, target_bytes, age_seconds, protected):
+                self.arguments = (target_bytes, age_seconds, protected)
+                return {
+                    "current_bytes": 2048,
+                    "target_bytes": target_bytes,
+                    "needed_bytes": 1024,
+                    "planned_bytes": 1500,
+                    "unmet_bytes": 0,
+                    "selected": [{
+                        "key": RegionKey("overworld", -1, 2),
+                        "bytes": 1500,
+                        "last_access": 100.0,
+                    }],
+                }
+
+        manager = FakeManager()
+        args = build_parser().parse_args([
+            "plan", "--config", str(self.config), "--target-bytes", "1024",
+        ])
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager", return_value=manager):
+            with redirect_stdout(output):
+                plan(args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(manager.catalog_calls, 1)
+        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set()))
+        self.assertEqual(payload["selected"], [{
+            "dimension": "overworld",
+            "region_x": -1,
+            "region_z": 2,
+            "bytes": 1500,
+            "last_access": 100.0,
+        }])
+        self.assertEqual(payload["mode"], "dry-run")
+        self.assertFalse(payload["automatic_eviction_enabled"])
+        self.assertTrue(payload["requires_paper_region_lease_before_each_offload"])
+
 
 if __name__ == "__main__":
     unittest.main()

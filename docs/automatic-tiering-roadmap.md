@@ -3,8 +3,9 @@
 This document describes the intended hybrid storage policy. It is a design and
 implementation checklist, not a claim that automatic eviction is available.
 The companion Paper patch now supports marked demand restore, explicit leased
-offload, and region access timestamps. A Python dry-run command lists age-based
-candidates, but there is no storage-budget controller or automatic scheduler.
+offload, and region access timestamps. Python commands list age-based
+candidates and dry-run a local world-data budget plan, but there is no automatic
+storage-budget controller or scheduler.
 Do not enable automatic eviction on a live world until the gates below pass on
 a disposable copy.
 
@@ -114,9 +115,10 @@ offload is not part of the initial rollout.
   the companion Paper 1.21.11 patch; not installed on Fiesta.
 - Paper region lease and explicit offload API with cross-process lock: implemented
   experimentally in the companion patch; no automatic policy calls it yet.
-- Region I/O access timestamps, initial catalog, and age-based candidate
-  listing: implemented experimentally. Local budget selection and automatic
-  scheduling are not implemented.
+- Region I/O access timestamps, initial catalog, age-based candidate listing,
+  and a dry-run planner for a configured local world-data target: implemented
+  experimentally. The planner does not measure remote headroom or perform
+  offloads; automatic scheduling is not implemented.
 - Disposable Paper-server integration and production rollout: not complete.
 
 See [DESIGN.md](../DESIGN.md) for the overall state machine and

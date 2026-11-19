@@ -60,19 +60,22 @@ synced; an unreadable access marker disables cold selection for that dimension.
 
 The catalog seeds existing local regions as hot when no history exists. Only
 use `--trust-atime` if the filesystem mount's access-time behavior has been
-verified. Candidate listing is a dry run, applies the configured `cold_age_days`
-(default 30), and excludes entries in `protected_regions`, for example
+verified. Candidate listing applies the configured `cold_age_days` (default
+30) and excludes entries in `protected_regions`, for example
 `["overworld/r.0.0", "nether/r.3.-2"]`:
 
 ```sh
 fiesta-world-tier catalog --config /etc/fiesta-world-tier/config.json
 fiesta-world-tier candidates --config /etc/fiesta-world-tier/config.json
+fiesta-world-tier plan --config /etc/fiesta-world-tier/config.json
 ```
 
-Paper tracks region access and rejects offloading if its tracker became
-unhealthy. The Python child then rechecks the configured access age while
-Paper's exclusive OS lock is held. No candidate scheduler currently calls this
-API. Run the unit tests with:
+The budget planner selects oldest cold local bundles until the configured
+`local_world_data_budget_bytes` is approached. It reports selected bundle
+sizes and any unmet amount; it does not move files or measure remaining Luna
+quota. Planning initializes local access metadata. Each actual offload still
+requires Paper's region lease, a healthy tracker, an old access timestamp, and
+available remote quota. No scheduler currently calls this API. Run the unit tests with:
 
 ```sh
 python3 -m unittest discover -s tests -v

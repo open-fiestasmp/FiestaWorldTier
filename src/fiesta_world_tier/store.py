@@ -453,10 +453,45 @@ class TierManager:
         """
         baseline = time.time() if when is None else when
         discovered: dict[RegionKey, float] = {}
+        for key in self.local_regions():
+            last_access = baseline
+            if when is None and trust_atime:
+                try:
+                    members = RegionBundle(self.server_root, key).files()
+                    last_access = max(member.stat().st_atime for member in members.values())
+                except FileNotFoundError:
+                    # Concurrent removal or rename: age this entry from now.
+                    last_access = baseline
+            marker_access = self._read_access_marker(key)
+            if marker_access is not None:
+                last_access = max(marker_access, last_access) if trust_atime else marker_access
+            else:
+                # Existing terrain with no trustworthy history starts hot.
+                self._write_access_marker(key, last_access, only_if_missing=True)
+                marker_access = self._read_access_marker(key)
+                if marker_access is not None:
+                    last_access = max(last_access, marker_access)
+            discovered[key] = last_access
+        with self._db() as db:
+            db.executemany("""INSERT INTO regions
+                (dimension,x,z,state,last_access) VALUES(?,?,?,'LOCAL_ONLY',?)
+                ON CONFLICT(dimension,x,z) DO UPDATE SET
+                  last_access=MAX(regions.last_access,excluded.last_access)""",
+                ((key.dimension, key.x, key.z, discovered[key]) for key in sorted(discovered)))
+        return len(discovered)
+
+    def local_regions(self) -> list[RegionKey]:
+        """Return regions with a local terrain file, rejecting unsafe paths."""
+        found: list[RegionKey] = []
         for dimension, relative_root in DIMENSION_ROOTS.items():
-            directory = self.server_root / relative_root / "region"
+            dimension_root = self.server_root / relative_root
+            directory = dimension_root / "region"
+            if dimension_root.is_symlink() or directory.is_symlink():
+                raise TierError(f"symlink in local region path: {directory}")
             if not directory.exists():
                 continue
+            if not directory.is_dir():
+                raise TierError(f"local region path is not a directory: {directory}")
             for path in directory.iterdir():
                 if path.is_symlink():
                     raise TierError(f"symlink in local region directory: {path}")
@@ -465,32 +500,49 @@ class TierManager:
                     continue
                 if not path.is_file():
                     raise TierError(f"non-file region entry: {path}")
-                key = RegionKey(dimension, int(match.group(1)), int(match.group(2)))
-                last_access = baseline
-                if when is None and trust_atime:
-                    try:
-                        members = RegionBundle(self.server_root, key).files()
-                        last_access = max(member.stat().st_atime for member in members.values())
-                    except FileNotFoundError:
-                        # Concurrent removal or rename: age this entry from now.
-                        last_access = baseline
-                marker_access = self._read_access_marker(key)
-                if marker_access is not None:
-                    last_access = max(marker_access, last_access) if trust_atime else marker_access
-                else:
-                    # Existing terrain with no trustworthy history starts hot.
-                    self._write_access_marker(key, last_access, only_if_missing=True)
-                    marker_access = self._read_access_marker(key)
-                    if marker_access is not None:
-                        last_access = max(last_access, marker_access)
-                discovered[key] = last_access
-        with self._db() as db:
-            db.executemany("""INSERT INTO regions
-                (dimension,x,z,state,last_access) VALUES(?,?,?,'LOCAL_ONLY',?)
-                ON CONFLICT(dimension,x,z) DO UPDATE SET
-                  last_access=MAX(regions.last_access,excluded.last_access)""",
-                ((key.dimension, key.x, key.z, discovered[key]) for key in sorted(discovered)))
-        return len(discovered)
+                found.append(RegionKey(dimension, int(match.group(1)), int(match.group(2))))
+        return sorted(found)
+
+    def local_region_size(self, key: RegionKey) -> int:
+        """Return the complete local bundle size, including external .mcc files."""
+        return sum(path.stat().st_size for path in RegionBundle(self.server_root, key).files().values())
+
+    def plan_local_budget(
+        self,
+        target_bytes: int,
+        age_seconds: float,
+        protected_regions: set[str] | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Choose oldest cold local bundles needed to meet a dry-run size target."""
+        if type(target_bytes) is not int or target_bytes < 0:
+            raise ValueError("local world-data target must be a non-negative integer")
+        local_sizes = {key: self.local_region_size(key) for key in self.local_regions()}
+        current_bytes = sum(local_sizes.values())
+        needed_bytes = max(0, current_bytes - target_bytes)
+        protected = protected_regions or set()
+        selected: list[dict] = []
+        planned_bytes = 0
+        if needed_bytes:
+            for key in self.cold_regions(age_seconds, now):
+                size = local_sizes.get(key)
+                if size is None or key.name in protected:
+                    continue
+                last_access = self.last_access(key)
+                if last_access is None:
+                    continue
+                selected.append({"key": key, "bytes": size, "last_access": last_access})
+                planned_bytes += size
+                if planned_bytes >= needed_bytes:
+                    break
+        return {
+            "current_bytes": current_bytes,
+            "target_bytes": target_bytes,
+            "needed_bytes": needed_bytes,
+            "planned_bytes": planned_bytes,
+            "unmet_bytes": max(0, needed_bytes - planned_bytes),
+            "selected": selected,
+        }
 
     def cold_regions(self, age_seconds: float, now: float | None = None) -> list[RegionKey]:
         if not math.isfinite(age_seconds) or age_seconds < 0:

@@ -138,6 +138,39 @@ class RegionTierTests(unittest.TestCase):
         with self.assertRaisesRegex(TierError, "invalid region access marker"):
             self.manager.catalog_local_regions(when=1000)
 
+    def test_budget_plan_selects_oldest_cold_bundles_until_target(self):
+        newer_key = RegionKey("overworld", 1, 0)
+        newer_region = self.root / "world/region/r.1.0.mca"
+        newer_region.write_bytes(b"newer region bytes")
+        self.manager.record_access(self.key, when=100)
+        self.manager.record_access(newer_key, when=500)
+        old_size = self.manager.local_region_size(self.key)
+        total_size = old_size + self.manager.local_region_size(newer_key)
+
+        plan = self.manager.plan_local_budget(
+            target_bytes=total_size - old_size,
+            age_seconds=100,
+            now=1000,
+        )
+
+        self.assertEqual(plan["current_bytes"], total_size)
+        self.assertEqual(plan["planned_bytes"], old_size)
+        self.assertEqual(plan["unmet_bytes"], 0)
+        self.assertEqual([item["key"] for item in plan["selected"]], [self.key])
+
+    def test_budget_plan_leaves_target_unmet_when_only_region_is_hot_or_protected(self):
+        size = self.manager.local_region_size(self.key)
+        self.manager.record_access(self.key, when=950)
+        hot_plan = self.manager.plan_local_budget(0, age_seconds=100, now=1000)
+        self.assertEqual(hot_plan["selected"], [])
+        self.assertEqual(hot_plan["unmet_bytes"], size)
+
+        protected_plan = self.manager.plan_local_budget(
+            0, age_seconds=100, protected_regions={self.key.name}, now=2000
+        )
+        self.assertEqual(protected_plan["selected"], [])
+        self.assertEqual(protected_plan["unmet_bytes"], size)
+
     def test_busy_region_is_never_evicted(self):
         self.lease.allow = False
         with self.assertRaisesRegex(TierError, "busy"):

@@ -36,11 +36,13 @@ under `<dimension-root>/.world-tier/access/`. It syncs the first touch after a
 cold interval and throttles repeated writes to the configured interval. A
 missing timestamp is treated as hot. The CLI's `catalog` command seeds existing
 local regions as hot if no trustworthy history exists; `candidates` reports
-age-eligible regions and excludes configured `protected_regions`. The candidate
-listing is a dry run and does not enforce an Oracle local-storage budget.
-Set `cold_age_days` in the private JSON config; both candidate listing and the
-offload command use that value, and the command rechecks age under Paper's
-exclusive lock.
+age-eligible regions and excludes configured `protected_regions`. The `plan`
+command estimates complete local bundle sizes and selects the oldest eligible
+regions until the configured `local_world_data_budget_bytes` is approached.
+It does not move files or measure remote quota. Cataloging and planning do
+persist local access metadata, but do not offload regions. Set `cold_age_days`
+in the private JSON config; candidate selection and the offload command use
+that value, and offload rechecks age under Paper's exclusive lock.
 
 The command validates the marker's dimension, coordinates, and manifest hash,
 checks the configured world root, verifies the complete downloaded bundle,
@@ -57,12 +59,13 @@ This hook covers demand restore and prevents missing remote data from being
 treated as new terrain. The Paper patch includes an explicit leased offload
 API and the Python `offload` command, which requires Paper's held OS file lock
 and rechecks the configured age under that lock.
-There is an experimental access-age catalog and dry-run candidate listing, but
-no local-storage budget controller or automatic scheduler, and no production
-caller invokes the API. Do not enable offloading on a live world until budget
-selection, restart/crash recovery, and concurrency behavior pass
-disposable-server tests. The patch has not been installed on Fiesta or
-exercised against a disposable Paper world.
+There is an experimental access-age catalog, dry-run candidate listing, and
+dry-run local-budget planner, but no remote-headroom-aware controller or
+automatic scheduler, and no production caller invokes the API. Paper patch
+`0039` refuses offload after an access-tracking failure. Do not enable
+offloading on a live world until budget selection, restart/crash recovery, and
+concurrency behavior pass disposable-server tests. The patch has not been
+installed on Fiesta or exercised against a disposable Paper world.
 
 The integration is intentionally fail-closed. If the marker, command,
 configuration, SSH host key, remote bundle, checksum, quota, or local disk

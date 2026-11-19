@@ -2,6 +2,7 @@
   "server_root": "/srv/fiesta",
   "journal": "/var/lib/fiesta-world-tier/state.sqlite3",
   "local_free_reserve_bytes": 16106127360,
+  "local_world_data_budget_bytes": null,
   "cold_age_days": 30,
   "protected_regions": [],
   "dimensions": {
