@@ -252,6 +252,32 @@ class InterruptingUploadOpenSSH(FakeOpenSSH):
         return super().run_sftp(batch)
 
 
+class MidFileDisconnectOpenSSH(FakeOpenSSH):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.partial_bytes = 0
+        self.interrupted_file_bytes = 0
+
+    def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        self.sftp_batches.append(batch)
+        for line in batch.splitlines():
+            args = shlex.split(line)
+            if args[0] == "mkdir":
+                self.path(args[1]).mkdir()
+                continue
+            if args[0] != "put":
+                raise AssertionError(f"unexpected fixture SFTP command before disconnect: {args[0]}")
+            local = Path(args[-2])
+            remote = self.path(args[-1])
+            remote.parent.mkdir(parents=True, exist_ok=True)
+            contents = local.read_bytes()
+            self.interrupted_file_bytes = len(contents)
+            self.partial_bytes = max(1, len(contents) // 2)
+            remote.write_bytes(contents[:self.partial_bytes])
+            raise TransientSFTPError("simulated SFTP disconnect mid-file")
+        raise AssertionError("fixture SFTP batch did not start an upload")
+
+
 class DisconnectingOpenSSH(FakeOpenSSH):
     def __init__(self, root: Path, get_disconnects: int, retryable: bool = True):
         super().__init__(root)
@@ -787,6 +813,22 @@ class OpenSSHStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(TransientSFTPError, "partial upload"):
             store.publish(self.key, files)
 
+        self.assertFalse(store.object_exists(self.key))
+        self.assertEqual(list(transport.path(str(store.staging)).iterdir()), [])
+        self.assertFalse(transport.path(str(store.lock_path)).exists())
+        self.assertEqual(store.usage(), 0)
+        self.assertTrue(all(path.is_file() for path in files.values()))
+
+    def test_mid_file_disconnect_cleans_partial_upload_and_keeps_local_bundle(self):
+        transport = MidFileDisconnectOpenSSH(self.root / "mid-file-disconnect-remote")
+        store = OpenSSHObjectStore(self.config, transport)
+        files = self.create_bundle()
+
+        with self.assertRaisesRegex(TransientSFTPError, "mid-file"):
+            store.publish(self.key, files)
+
+        self.assertGreater(transport.partial_bytes, 0)
+        self.assertLess(transport.partial_bytes, transport.interrupted_file_bytes)
         self.assertFalse(store.object_exists(self.key))
         self.assertEqual(list(transport.path(str(store.staging)).iterdir()), [])
         self.assertFalse(transport.path(str(store.lock_path)).exists())
