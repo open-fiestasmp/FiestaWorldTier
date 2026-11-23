@@ -21,6 +21,19 @@ from .store import DirectoryObjectStore, RegionKey, TierError
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_BUNDLE_FILES = 4096
+TRANSIENT_SSH_DIAGNOSTIC = re.compile(
+    r"(?:connection refused|connection timed out|operation timed out|no route to host|"
+    r"network is unreachable|connection reset by peer|connection aborted|"
+    r"temporary failure in name resolution|"
+    r"connection closed by (?:remote host|[^\r\n]+ port \d+))",
+    re.IGNORECASE,
+)
+
+
+def _ssh_transport_failure(operation: str, diagnostic: str) -> TierError:
+    if TRANSIENT_SSH_DIAGNOSTIC.search(diagnostic):
+        return TransientSSHError(f"{operation} transport disconnected")
+    return TierError(f"{operation} failed (exit 255)")
 
 
 class TransientTransferError(TierError):
@@ -144,13 +157,20 @@ class OpenSSHTransport:
             self.options.extend(["-o", "Compression=yes"])
 
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            ["ssh", "-T", *self.options, self.target, command],
-            text=True,
-            capture_output=True,
-            timeout=self.config.timeout_seconds,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["ssh", "-T", *self.options, self.target, command],
+                text=True,
+                capture_output=True,
+                timeout=self.config.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TransientSSHError("SSH operation timed out", retryable=False) from exc
+        except OSError as exc:
+            raise TransientSSHError("SSH process could not complete", retryable=False) from exc
+        if result.returncode == 255:
+            raise _ssh_transport_failure("SSH operation", result.stderr or "")
         if check and result.returncode != 0:
             raise TierError(f"remote SSH operation failed (exit {result.returncode})")
         return result
@@ -178,7 +198,10 @@ class OpenSSHTransport:
         except OSError as exc:
             raise TransientSFTPError("SFTP process could not complete", retryable=False) from exc
         if result.returncode == 255:
-            raise TransientSFTPError("SFTP SSH transport disconnected")
+            failure = _ssh_transport_failure("SFTP operation", result.stderr or "")
+            if isinstance(failure, TransientSSHError):
+                raise TransientSFTPError(str(failure))
+            raise failure
         if result.returncode != 0:
             raise TierError(f"SFTP operation failed (exit {result.returncode})")
         return result
@@ -201,13 +224,14 @@ class OpenSSHTransport:
 
         command = "cat -- " + " ".join(shlex.quote(path) for path in remote_paths)
         process: subprocess.Popen[bytes] | None = None
+        error_output = tempfile.TemporaryFile()
         deadline = time.monotonic() + self.config.timeout_seconds
         try:
             process = subprocess.Popen(
                 ["ssh", "-T", *self.options, self.target, command],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=error_output,
                 bufsize=0,
             )
             assert process.stdout is not None
@@ -280,6 +304,13 @@ class OpenSSHTransport:
                         target_remaining -= take
                         if target_remaining == 0:
                             advance_target()
+            return_code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if return_code == 255:
+                error_output.seek(0)
+                diagnostic = error_output.read().decode("utf-8", errors="replace")
+                raise _ssh_transport_failure("SSH stream", diagnostic)
+            if return_code != 0:
+                raise TierError(f"SSH stream failed (exit {return_code})")
             if target_index < len(targets) - 1:
                 if target_remaining:
                     raise TierError("SSH stream ended before a declared file was complete")
@@ -290,11 +321,6 @@ class OpenSSHTransport:
                 if open_target is None:
                     open_current()
                 advance_target()
-            return_code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-            if return_code == 255:
-                raise TransientSSHError("SSH stream disconnected")
-            if return_code != 0:
-                raise TierError(f"SSH stream failed (exit {return_code})")
         except TimeoutError as exc:
             if process is not None and process.poll() is None:
                 process.terminate()
@@ -326,6 +352,7 @@ class OpenSSHTransport:
                 selector.close()
             if 'open_target' in locals() and open_target is not None:
                 open_target.close()
+            error_output.close()
 
 
 class OpenSSHObjectStore:
@@ -379,8 +406,12 @@ class OpenSSHObjectStore:
     def _ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         try:
             result = self.transport.run_ssh(command, check=check)
+        except TransientTransferError:
+            raise
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise TierError("remote SSH connection failed") from exc
+            raise TransientSSHError("SSH operation could not complete", retryable=False) from exc
+        if result.returncode == 255:
+            raise _ssh_transport_failure("SSH operation", result.stderr or "")
         if check and result.returncode != 0:
             raise TierError(f"remote SSH operation failed (exit {result.returncode})")
         return result
@@ -393,7 +424,10 @@ class OpenSSHObjectStore:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise TransientSFTPError("SFTP connection failed", retryable=False) from exc
         if result.returncode == 255:
-            raise TransientSFTPError("SFTP SSH transport disconnected")
+            failure = _ssh_transport_failure("SFTP operation", result.stderr or "")
+            if isinstance(failure, TransientSSHError):
+                raise TransientSFTPError(str(failure))
+            raise failure
         if result.returncode != 0:
             raise TierError(f"SFTP operation failed (exit {result.returncode})")
 
@@ -519,6 +553,8 @@ class OpenSSHObjectStore:
             if len(encoded) > MAX_MANIFEST_BYTES:
                 raise TierError("remote manifest exceeds the 1 MiB size limit")
             return encoded
+        except TransientTransferError:
+            raise
         except (TierError, UnicodeError) as exc:
             raise TierError(f"remote manifest unavailable or corrupt for {key.name}") from exc
 

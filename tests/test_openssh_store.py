@@ -569,6 +569,7 @@ class OpenSSHStoreTests(unittest.TestCase):
             "elif mode == 'large': sys.stdout.buffer.write(b'x' * (1024 * 1024 + 1))\n"
             "elif mode == 'truncated': sys.stdout.buffer.write(b'abc')\n"
             "else: sys.stdout.buffer.write(b'abc{}')\n"
+            "if mode == 'disconnect': print('ssh: connect to host 127.0.0.1 port 22: Connection refused', file=sys.stderr)\n"
             "sys.stdout.buffer.flush()\n"
             "sys.exit(255 if mode == 'disconnect' else 0)\n",
             encoding="utf-8",
@@ -597,8 +598,10 @@ class OpenSSHStoreTests(unittest.TestCase):
             "mode = os.environ.get('FIESTA_TEST_SSH_MODE')\n"
             "if mode == 'large': sys.stdout.buffer.write(b'x' * (1024 * 1024 + 1))\n"
             "else: sys.stdout.buffer.write(b'abc')\n"
+            "if mode == 'disconnect': print('ssh: connect to host 127.0.0.1 port 22: Connection refused', file=sys.stderr)\n"
+            "if mode == 'auth': print('Permission denied (publickey).', file=sys.stderr)\n"
             "sys.stdout.buffer.flush()\n"
-            "sys.exit(255 if mode == 'disconnect' else 0)\n",
+            "sys.exit(255 if mode in ('disconnect', 'auth') else 0)\n",
             encoding="utf-8",
         )
         fake_ssh.chmod(0o755)
@@ -614,6 +617,10 @@ class OpenSSHStoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FIESTA_TEST_SSH_MODE": "disconnect"}):
             with self.assertRaisesRegex(TransientSSHError, "disconnected"):
                 transport.stream_remote_files(["/remote/manifest"], [(self.root / "disconnected", None)])
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}", "FIESTA_TEST_SSH_MODE": "auth"}):
+            with self.assertRaisesRegex(TierError, "exit 255") as raised:
+                transport.stream_remote_files(["/remote/manifest"], [(self.root / "auth-failure", None)])
+            self.assertNotIsInstance(raised.exception, TransientSSHError)
 
     def test_ssh_stream_timeout_is_not_retried(self):
         fake_bin = self.root / "stream-timeout-bin"
@@ -647,6 +654,35 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertIn("ControlMaster=auto", arguments)
         self.assertIn("ControlPersist=30", arguments)
         self.assertIn(f"ControlPath={self.config.control_path}", arguments)
+
+    def test_ssh_transport_disconnect_is_retryable(self):
+        transport = OpenSSHTransport(self.config)
+        for diagnostic in (
+            "connection refused",
+            "Could not resolve hostname luna: Temporary failure in name resolution",
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                completed = subprocess.CompletedProcess([], 255, "", diagnostic)
+                with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed):
+                    with self.assertRaisesRegex(TransientSSHError, "transport disconnected") as raised:
+                        transport.run_ssh("true")
+                self.assertTrue(raised.exception.retryable)
+
+    def test_ssh_authentication_and_host_key_errors_are_not_retryable(self):
+        transport = OpenSSHTransport(self.config)
+        for diagnostic in ("Permission denied (publickey).", "Host key verification failed."):
+            with self.subTest(diagnostic=diagnostic):
+                completed = subprocess.CompletedProcess([], 255, "", diagnostic)
+                with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed):
+                    with self.assertRaisesRegex(TierError, "exit 255") as raised:
+                        transport.run_ssh("true")
+                self.assertNotIsInstance(raised.exception, TransientSSHError)
+
+    def test_manifest_read_preserves_retryable_transport_failure(self):
+        with patch.object(self.transport, "run_ssh", side_effect=TransientSSHError("disconnected")):
+            with self.assertRaisesRegex(TransientSSHError, "disconnected") as raised:
+                self.store.read_manifest(self.key)
+        self.assertTrue(raised.exception.retryable)
 
     def test_transport_enables_optional_ssh_compression_for_ssh_and_sftp(self):
         config = OpenSSHConfig(**{**self.config.__dict__, "compression": True})

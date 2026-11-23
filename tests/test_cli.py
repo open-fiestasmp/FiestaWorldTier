@@ -12,9 +12,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fiesta_world_tier.cli import _dimension_config, _read_marker
+from fiesta_world_tier.cli import _dimension_config, _read_marker, main
 from fiesta_world_tier.leases import FileRegionLease
 from fiesta_world_tier import RegionKey, TierError
+from fiesta_world_tier.openssh_store import TransientSSHError
 
 
 class RestoreCliTests(unittest.TestCase):
@@ -69,6 +70,34 @@ class RestoreCliTests(unittest.TestCase):
         (marker_dir / "r.0.0.json").symlink_to(outside)
         with self.assertRaisesRegex(TierError, "missing or invalid"):
             _read_marker(self.world, RegionKey("overworld", 0, 0), "minecraft:overworld")
+
+    def test_retryable_remote_transfer_errors_use_temporary_failure_exit_code(self):
+        from argparse import Namespace
+        from contextlib import redirect_stderr
+
+        def fail(_args):
+            raise TransientSSHError("SSH transport disconnected")
+
+        stderr = io.StringIO()
+        with patch("fiesta_world_tier.cli.build_parser") as build_parser:
+            build_parser.return_value.parse_args.return_value = Namespace(handler=fail)
+            with redirect_stderr(stderr):
+                self.assertEqual(main([]), 75)
+        self.assertIn("SSH transport disconnected", stderr.getvalue())
+
+    def test_non_retryable_remote_transfer_errors_keep_failure_exit_code(self):
+        from argparse import Namespace
+        from contextlib import redirect_stderr
+
+        def fail(_args):
+            raise TransientSSHError("SSH operation timed out", retryable=False)
+
+        stderr = io.StringIO()
+        with patch("fiesta_world_tier.cli.build_parser") as build_parser:
+            build_parser.return_value.parse_args.return_value = Namespace(handler=fail)
+            with redirect_stderr(stderr):
+                self.assertEqual(main([]), 1)
+        self.assertIn("SSH operation timed out", stderr.getvalue())
 
 
 class PaperLeaseCliTests(unittest.TestCase):

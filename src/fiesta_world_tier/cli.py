@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import stat
 import subprocess
@@ -11,7 +12,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 from .leases import FileRegionLease
-from .openssh_store import OpenSSHConfig, OpenSSHObjectStore
+from .openssh_store import OpenSSHConfig, OpenSSHObjectStore, TransientTransferError
 from .paper_lease import paper_lease_is_held
 from .store import DIMENSION_KEYS, DIMENSION_ROOTS, RegionKey, TierError, TierManager
 
@@ -433,6 +434,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         args.handler(args)
+    except TransientTransferError as exc:
+        if not (exc.retryable and os.environ.get("FIESTA_WORLD_TIER_PAPER") == "1"):
+            print(f"fiesta-world-tier: {exc}", file=sys.stderr)
+        return 75 if exc.retryable else 1
     except (KeyError, OSError, TypeError, ValueError, TierError) as exc:
         print(f"fiesta-world-tier: {exc}", file=sys.stderr)
         return 1
