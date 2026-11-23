@@ -706,6 +706,7 @@ class OpenSSHStoreTests(unittest.TestCase):
             ("region/r.-2.5.mca", b"terrain data"),
             ("entities/r.-2.5.mca", b"entity data"),
             ("poi/r.-2.5.mca", b"poi data"),
+            ("region/c.-64.160.mcc", b"oversized chunk data"),
         ):
             path = key_root / member
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -724,7 +725,12 @@ class OpenSSHStoreTests(unittest.TestCase):
         )
         original = {
             member: (key_root / member).read_bytes()
-            for member in ("region/r.-2.5.mca", "entities/r.-2.5.mca", "poi/r.-2.5.mca")
+            for member in (
+                "region/r.-2.5.mca",
+                "entities/r.-2.5.mca",
+                "poi/r.-2.5.mca",
+                "region/c.-64.160.mcc",
+            )
         }
         manager.offload(self.key)
         self.assertEqual(manager.state(self.key), "REMOTE_ONLY")
