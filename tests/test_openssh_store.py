@@ -241,6 +241,17 @@ class CorruptingOpenSSH(FakeOpenSSH):
         return result
 
 
+class InterruptingUploadOpenSSH(FakeOpenSSH):
+    def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        partial = []
+        for line in batch.splitlines():
+            partial.append(line)
+            if shlex.split(line)[0] == "put":
+                super().run_sftp("\n".join(partial) + "\n")
+                raise TransientSFTPError("simulated disconnect after partial upload")
+        return super().run_sftp(batch)
+
+
 class DisconnectingOpenSSH(FakeOpenSSH):
     def __init__(self, root: Path, get_disconnects: int, retryable: bool = True):
         super().__init__(root)
@@ -767,6 +778,20 @@ class OpenSSHStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(TierError, "remote upload verification failed"):
             store.publish(self.key, self.create_bundle())
         self.assertFalse(store._exists(store._object_path(self.key)))
+
+    def test_interrupted_upload_cleans_staging_and_keeps_local_bundle(self):
+        transport = InterruptingUploadOpenSSH(self.root / "interrupted-remote")
+        store = OpenSSHObjectStore(self.config, transport)
+        files = self.create_bundle()
+
+        with self.assertRaisesRegex(TransientSFTPError, "partial upload"):
+            store.publish(self.key, files)
+
+        self.assertFalse(store.object_exists(self.key))
+        self.assertEqual(list(transport.path(str(store.staging)).iterdir()), [])
+        self.assertFalse(transport.path(str(store.lock_path)).exists())
+        self.assertEqual(store.usage(), 0)
+        self.assertTrue(all(path.is_file() for path in files.values()))
 
     def test_config_rejects_unsafe_roots_and_insecure_identity_permissions(self):
         with self.assertRaisesRegex(ValueError, "beneath the SSH user's home"):

@@ -13,7 +13,12 @@ The prototype models the durable transfer state machine and tests it against
 disposable worlds and a local object-store fixture. It includes an optional
 OpenSSH adapter that requires a pinned host key and a restricted-permission
 identity file. Uploads use SFTP; verified restores stream over SSH. Automated
-transport tests use a local fake. After the batched
+transport tests use a local fake, including a partial SFTP upload interruption
+that must remove staging data and leave the local bundle intact. A disposable
+Luna SFTP run also interrupted the bundle after its first member; staging was
+empty afterward, no object was published, the writer lock was released, and
+the local source was unchanged. It did not interrupt a member mid-transfer.
+Luna process-crash recovery remains untested. After the batched
 transport change, a disposable Paper 1.21.11 server restored a synthetic
 spawn-region bundle from Luna after `/forceload add` requested the marked
 chunk. The restored region SHA-256 matched the original, the durable marker
