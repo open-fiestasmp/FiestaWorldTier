@@ -307,10 +307,14 @@ synthetic region bundles to a new Luna test root. Each bundle included a
 SHA-256 hashes. A 1 KiB application cap rejected another publish, and changing
 one byte in a remote sidecar caused verification to fail. Guarded deletion,
 republish, verification, and final cleanup all passed; remote usage returned to
-zero and the test root was removed. The concurrent publish phase took 103
-seconds, and the full test took 275 seconds. This is a slow storage path, not a
-player-latency result. The application cap and free-space floor are not an
-OS-enforced Luna quota. No Fiesta world data was used.
+zero and the test root was removed. That run used separate SSH connections:
+concurrent publication took 103 seconds, and the full test took 275 seconds.
+With the same two-bundle workload and SSH multiplexing through a private
+control socket, publication took 52.7 seconds; verification and fetch finished
+at 64.1 seconds, and guarded cleanup finished at 66.2 seconds. This suggests
+connection reuse helps, though these are single synthetic runs. They do not
+measure player cold-load latency. The application cap and free-space floor are
+not an OS-enforced Luna quota. No Fiesta world data was used.
 
 ## Proposed production design
 
