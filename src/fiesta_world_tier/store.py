@@ -73,9 +73,11 @@ class RegionBundle:
                 if path.is_symlink() or not path.is_file() or not resolved.is_relative_to(server_root):
                     raise TierError(f"not a regular region file: {path}")
                 found[f"{component}/{self.filename}"] = path
-        region_dir = root / "region"
-        if region_dir.exists():
-            for path in region_dir.iterdir():
+        for component in COMPONENTS:
+            component_dir = root / component
+            if not component_dir.exists():
+                continue
+            for path in component_dir.iterdir():
                 match = re.fullmatch(r"c\.(-?\d+)\.(-?\d+)\.mcc", path.name)
                 if not match:
                     continue
@@ -85,7 +87,7 @@ class RegionBundle:
                 resolved = path.resolve()
                 if path.is_symlink() or not path.is_file() or not resolved.is_relative_to(server_root):
                     raise TierError(f"not a regular external chunk file: {path}")
-                found[f"region/{path.name}"] = path
+                found[f"{component}/{path.name}"] = path
         if f"region/{self.filename}" not in found:
             raise TierError(f"terrain region is missing: {self.key.name}")
         return found
@@ -155,10 +157,10 @@ class DirectoryObjectStore:
             return False
         component, filename = path.parts
         region_name = f"r.{key.x}.{key.z}.mca"
-        if component in COMPONENTS and filename == region_name:
-            return True
-        if component != "region":
+        if component not in COMPONENTS:
             return False
+        if filename == region_name:
+            return True
         match = re.fullmatch(r"c\.(-?\d+)\.(-?\d+)\.mcc", filename)
         return bool(match and int(match.group(1)) // 32 == key.x and int(match.group(2)) // 32 == key.z)
 

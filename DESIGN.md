@@ -7,10 +7,11 @@ region file. Tiering one chunk means rewriting region headers, sector offsets,
 compression payloads, and related entity/POI data while the server may still
 have the region open. Fiesta should tier a complete same-coordinate bundle:
 terrain (`region`), entities (`entities`), and points of interest (`poi`).
-Paper's external oversized-chunk `.mcc` sidecars in the terrain region
-directory must also move with their parent region; the prototype maps these by
-chunk coordinates using floor division, including negative coordinates. The
-Overworld, Nether, and End use their own world folders.
+Paper stores oversized-chunk `.mcc` sidecars beside their `.mca` file. This
+applies to terrain, entity, and POI region folders; each sidecar must move with
+its parent region. The prototype matches sidecars by chunk coordinates using
+floor division, including negative coordinates. The Overworld, Nether, and End
+use their own world folders.
 
 For Fiesta's current layout the logical roots are:
 
@@ -123,8 +124,10 @@ failure rather than become `NO_DATA`.
 The 1.21.11 Paper patch shows `moonrise$getRegionFileIfExists` returning a
 cached `RegionFile`, then checking `Files.exists(regionPath)` and returning
 `null` when absent. Restore must run before that missing-file return. Paper's
-`RegionFile` also resolves oversized chunk data as `c.<chunkX>.<chunkZ>.mcc`,
-so those sidecars are part of the region bundle. References:
+`RegionFile` resolves oversized data as `c.<chunkX>.<chunkZ>.mcc` under its
+configured external-file directory. Paper uses each component's storage
+folder for that directory, so sidecars in `region`, `entities`, or `poi` are
+part of the matching bundle. References:
 [Paper 1.21.11 Moonrise region storage patch](https://github.com/PaperMC/Paper/blob/ver/1.21.11/paper-server/patches/features/0001-Moonrise-optimisation-patches.patch),
 [Paper 1.21.11 external chunk file handling](https://github.com/PaperMC/Paper/blob/ver/1.21.11/paper-server/patches/features/0019-Attempt-to-recalculate-regionfile-header-if-it-is-co.patch).
 

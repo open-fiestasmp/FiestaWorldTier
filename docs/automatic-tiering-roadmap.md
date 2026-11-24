@@ -22,10 +22,9 @@ a live world until the remaining gates below pass on a disposable copy.
 Minecraft stores 32 by 32 chunks in an Anvil region. The tiering unit is the
 whole same-coordinate region bundle, not an individual chunk:
 
-- terrain: `region/r.<x>.<z>.mca` and any matching `c.<chunkX>.<chunkZ>.mcc`
-  oversized-chunk sidecars;
-- entities: `entities/r.<x>.<z>.mca`;
-- points of interest: `poi/r.<x>.<z>.mca`.
+- terrain: `region/r.<x>.<z>.mca` and matching `.mcc` sidecars in `region/`;
+- entities: `entities/r.<x>.<z>.mca` and matching `.mcc` sidecars in `entities/`;
+- points of interest: `poi/r.<x>.<z>.mca` and matching `.mcc` sidecars in `poi/`.
 
 The bundle is tracked independently for the Overworld, Nether, and End. Player
 data, plugin state, chat archives, configuration, and backups are not part of

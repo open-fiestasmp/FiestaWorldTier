@@ -163,8 +163,8 @@ player. The player-facing restore latency gate remains open.
 
 - Tier complete region bundles, not individual chunk NBT records. A bundle
   consists of the same `r.x.z.mca` in the dimension's `region`, `entities`, and
-  `poi` directories when those files exist, plus any `.mcc` oversized-chunk
-  sidecars belonging to that region.
+  `poi` directories when those files exist, plus matching `.mcc` sidecars in
+  each of those component directories.
 - Mark a region cold only when all of its chunks have been unused for the
   configured age, no chunk is loaded, and no save or region-file operation is
   in flight.

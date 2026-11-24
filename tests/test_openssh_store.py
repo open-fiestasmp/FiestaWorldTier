@@ -332,6 +332,8 @@ class OpenSSHStoreTests(unittest.TestCase):
             ("entities/r.-2.5.mca", b"entity data"),
             ("poi/r.-2.5.mca", b"poi data"),
             ("region/c.-64.160.mcc", b"oversized chunk data"),
+            ("entities/c.-64.160.mcc", b"oversized entity data"),
+            ("poi/c.-64.160.mcc", b"oversized poi data"),
         ):
             path = self.source / member
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -744,6 +746,8 @@ class OpenSSHStoreTests(unittest.TestCase):
             ("entities/r.-2.5.mca", b"entity data"),
             ("poi/r.-2.5.mca", b"poi data"),
             ("region/c.-64.160.mcc", b"oversized chunk data"),
+            ("entities/c.-64.160.mcc", b"oversized entity data"),
+            ("poi/c.-64.160.mcc", b"oversized poi data"),
         ):
             path = key_root / member
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -767,6 +771,8 @@ class OpenSSHStoreTests(unittest.TestCase):
                 "entities/r.-2.5.mca",
                 "poi/r.-2.5.mca",
                 "region/c.-64.160.mcc",
+                "entities/c.-64.160.mcc",
+                "poi/c.-64.160.mcc",
             )
         }
         manager.offload(self.key)

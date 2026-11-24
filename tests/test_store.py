@@ -75,8 +75,10 @@ class RegionTierTests(unittest.TestCase):
             path = root / component / "r.-2.5.mca"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
-        (root / "region/c.-64.160.mcc").write_bytes(b"external chunk data")
-        (root / "region/c.0.0.mcc").write_bytes(b"different region; leave local")
+        for component in ("region", "entities", "poi"):
+            component_dir = root / component
+            (component_dir / "c.-64.160.mcc").write_bytes(f"{component} external chunk data".encode())
+            (component_dir / "c.0.0.mcc").write_bytes(b"different region; leave local")
 
     def local_contents(self):
         return {
@@ -86,8 +88,9 @@ class RegionTierTests(unittest.TestCase):
 
     def test_offload_restore_round_trip(self):
         original = self.local_contents()
-        self.assertIn("region/c.-64.160.mcc", original)
-        self.assertNotIn("region/c.0.0.mcc", original)
+        for component in ("region", "entities", "poi"):
+            self.assertIn(f"{component}/c.-64.160.mcc", original)
+            self.assertNotIn(f"{component}/c.0.0.mcc", original)
         self.manager.record_access(self.key, when=100)
         self.assertEqual(self.manager.cold_regions(500, now=700), [self.key])
         self.manager.offload(self.key)
@@ -105,6 +108,11 @@ class RegionTierTests(unittest.TestCase):
         self.assertEqual(self.store.usage(), 0)
         self.assertFalse(marker.exists())
         self.assertEqual(self.lease.calls, 2)
+
+    def test_manifest_accepts_external_sidecars_for_every_region_component(self):
+        for component in ("region", "entities", "poi"):
+            self.assertTrue(self.store._valid_member(self.key, f"{component}/c.-64.160.mcc"))
+            self.assertFalse(self.store._valid_member(self.key, f"{component}/c.0.0.mcc"))
 
     def test_staged_offload_releases_lease_during_publish_and_finalizes_unchanged_bundle(self):
         original = self.local_contents()
@@ -387,7 +395,8 @@ class RegionTierTests(unittest.TestCase):
         self.assertEqual(json.loads(marker.read_text())["state"], "RESTORING")
         self.assertTrue(self.store.object_exists(self.key))
         self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
-        self.assertTrue((self.root / "world/entities/r.-2.5.mca").is_file())
+        self.assertTrue((self.root / "world/entities/c.-64.160.mcc").is_file())
+        self.assertFalse((self.root / "world/entities/r.-2.5.mca").exists())
         self.assertEqual(list(stage_root.iterdir()), [])
 
         self.manager.recover(self.key)
@@ -475,6 +484,19 @@ class RegionTierTests(unittest.TestCase):
         path.symlink_to(outside)
         with self.assertRaisesRegex(TierError, "regular region file"):
             RegionBundle(self.root, self.key).files()
+
+    def test_bundle_rejects_symlink_sidecars_in_each_component(self):
+        outside = Path(self.temp.name) / "outside.mcc"
+        outside.write_bytes(b"outside")
+        for component in ("region", "entities", "poi"):
+            path = self.root / "world" / component / "c.-64.160.mcc"
+            path.unlink()
+            path.symlink_to(outside)
+            with self.subTest(component=component):
+                with self.assertRaisesRegex(TierError, "regular external chunk file"):
+                    RegionBundle(self.root, self.key).files()
+            path.unlink()
+            path.write_bytes(b"external chunk data")
 
     def test_invalid_dimension_rejected(self):
         with self.assertRaises(ValueError):
