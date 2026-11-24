@@ -577,6 +577,30 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertTrue(lock_path.is_dir())
         self.assertTrue(self.store.object_exists(self.key))
 
+    def test_remote_writer_lock_retries_if_lock_disappears_between_checks(self):
+        lock = shlex.quote(str(self.store.lock_path))
+        mkdir_command = f"umask 077 && mkdir -- {lock}"
+        test_command = f"test -d {lock}"
+        rmdir_command = f"rmdir -- {lock}"
+        mkdir_calls = 0
+
+        def run(command, *, check=True):
+            nonlocal mkdir_calls
+            if command == mkdir_command:
+                mkdir_calls += 1
+                return self.transport.result(1 if mkdir_calls == 1 else 0)
+            if command == test_command:
+                return self.transport.result(1)
+            if command == rmdir_command:
+                return self.transport.result()
+            raise AssertionError(f"unexpected SSH command: {command}")
+
+        with patch.object(self.store, "_ssh", side_effect=run):
+            with self.store._remote_writer_lock():
+                pass
+
+        self.assertEqual(mkdir_calls, 2)
+
     def test_usage_snapshot_is_advisory_and_does_not_create_remote_directories(self):
         self.assertEqual(self.store.usage_snapshot(), 0)
         self.assertFalse(self.transport.path(str(self.store.objects)).exists())

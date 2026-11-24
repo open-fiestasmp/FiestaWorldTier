@@ -460,6 +460,11 @@ class OpenSSHObjectStore:
             if result.returncode != 1:
                 raise TierError(f"could not acquire remote writer lock (exit {result.returncode})")
             exists = self._ssh(f"test -d {lock}", check=False)
+            if exists.returncode == 1:
+                if time.monotonic() >= deadline:
+                    raise TierError("remote writer lock is busy; inspect it before retrying")
+                time.sleep(0.5)
+                continue
             if exists.returncode != 0:
                 raise TierError("remote writer lock creation failed")
             if time.monotonic() >= deadline:

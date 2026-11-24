@@ -301,6 +301,17 @@ hashes, cleared the marker, and returned remote usage to zero. The unique Luna
 test root was removed. This does not test a Luna OS-level quota or the patched
 Paper/player path. No Fiesta world data was used.
 
+On 2026-11-25, two independent store instances concurrently published
+synthetic region bundles to a new Luna test root. Each bundle included a
+1.5 MiB `.mcc` sidecar. Both remote objects verified and restored with matching
+SHA-256 hashes. A 1 KiB application cap rejected another publish, and changing
+one byte in a remote sidecar caused verification to fail. Guarded deletion,
+republish, verification, and final cleanup all passed; remote usage returned to
+zero and the test root was removed. The concurrent publish phase took 103
+seconds, and the full test took 275 seconds. This is a slow storage path, not a
+player-latency result. The application cap and free-space floor are not an
+OS-enforced Luna quota. No Fiesta world data was used.
+
 ## Proposed production design
 
 See [DESIGN.md](DESIGN.md), the
