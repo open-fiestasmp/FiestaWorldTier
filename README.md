@@ -108,6 +108,12 @@ remote usage to zero. These were single disposable probes, not Paper
 player-latency measurements. The earlier 180-second publish timeout remains
 unexplained.
 
+A 17.3 MB synthetic six-file bundle also passed publish, readback verification,
+SSH fetch, checksum checks, and guarded deletion with a 180-second operation
+timeout. Publish took 51.42 seconds and fetch took 4.11 seconds; the unique
+test root was removed afterward. This still does not explain the earlier
+timeout or measure a Paper player session.
+
 With the larger download buffer and hash-guarded single-command cleanup, a
 disposable 651 KiB store restore sequence took 0.50 seconds for the manifest,
 6.00 seconds for fetch, and 0.57 seconds for remote cleanup (7.07 seconds
