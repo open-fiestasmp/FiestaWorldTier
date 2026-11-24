@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -726,6 +727,45 @@ class OpenSSHStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(TierError, "exit 255") as raised:
                 transport.stream_remote_files(["/remote/manifest"], [(self.root / "auth-failure", None)])
             self.assertNotIsInstance(raised.exception, TransientSSHError)
+
+    def test_ssh_stream_preserves_local_enospc_when_partial_file_close_fails(self):
+        fake_bin = self.root / "stream-enospc-bin"
+        fake_bin.mkdir()
+        fake_ssh = fake_bin / "ssh"
+        fake_ssh.write_text(
+            "#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'abc')\nsys.stdout.buffer.flush()\n",
+            encoding="utf-8",
+        )
+        fake_ssh.chmod(0o755)
+        output = self.root / "stream-enospc-output"
+        original_open = Path.open
+
+        class FullDiskSink:
+            def __init__(self):
+                self.close_called = False
+
+            def write(self, _data):
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            def close(self):
+                self.close_called = True
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        sink = FullDiskSink()
+
+        def open_output(path, *args, **kwargs):
+            if path == output:
+                return sink
+            return original_open(path, *args, **kwargs)
+
+        transport = OpenSSHTransport(self.config)
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}):
+            with patch.object(Path, "open", new=open_output):
+                with self.assertRaisesRegex(TierError, "local disk is full while staging") as raised:
+                    transport.stream_remote_files(["/remote/a"], [(output, 4)])
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+        self.assertEqual(raised.exception.__cause__.errno, errno.ENOSPC)
+        self.assertTrue(sink.close_called)
 
     def test_ssh_stream_timeout_is_not_retried(self):
         fake_bin = self.root / "stream-timeout-bin"

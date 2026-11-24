@@ -290,9 +290,16 @@ The local suite injects `ENOSPC` after a partial member download and while the
 second staged member is being published. In both cases the region stays marked
 for restore, the verified remote bundle remains available, and the temporary
 restore directory is removed. A retry then restores and verifies the original
-bundle. These are injected failures in the Python store fixture; they do not
-replace a full-filesystem test or a Paper runtime test. No Fiesta world data is
-used.
+bundle.
+
+On 2026-11-24, a separate disposable test used a 32 MiB `tmpfs` and Luna's real
+OpenSSH/SFTP store with a three-file synthetic bundle. The test filled the local
+filesystem after the restore space check. The restore reported local `ENOSPC`,
+kept its marker and remote object, and removed the partial stage. After the
+filler was removed, recovery restored all three files with matching SHA-256
+hashes, cleared the marker, and returned remote usage to zero. The unique Luna
+test root was removed. This does not test a Luna OS-level quota or the patched
+Paper/player path. No Fiesta world data was used.
 
 ## Proposed production design
 

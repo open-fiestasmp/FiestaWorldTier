@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -346,6 +347,8 @@ class OpenSSHTransport:
                     process.wait()
             raise TransientSSHError("SSH stream timed out", retryable=False) from exc
         except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise TierError("local disk is full while staging an SSH restore") from exc
             raise TransientSSHError("SSH stream process could not complete", retryable=False) from exc
         finally:
             if process is not None:
@@ -357,7 +360,10 @@ class OpenSSHTransport:
             if 'selector' in locals():
                 selector.close()
             if 'open_target' in locals() and open_target is not None:
-                open_target.close()
+                try:
+                    open_target.close()
+                except OSError:
+                    pass
             error_output.close()
 
 
