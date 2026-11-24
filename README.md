@@ -91,6 +91,23 @@ real Luna probe rejected 256 KiB writes as an oversized packet. The download
 benchmark improved by about 21%; the full Paper restore cycle still needs a
 repeat with the larger download buffer.
 
+The adapter sets OpenSSH's SFTP request window to 128 for every batch. OpenSSH
+defaults to 64 and notes that a larger window can improve transfer speed while
+using more memory. In one Luna comparison, a 2 MiB synthetic file with a 32
+KiB packet buffer took 7.06 seconds to upload and 11.19 seconds to download at
+64 requests; at 128 it took 4.64 seconds and 4.85 seconds. Both downloads
+matched the source checksum.
+
+A separate 4.38 MiB six-file bundle took 43.92 seconds to publish and verify
+with the default request window. After the change, another bundle of the same
+size took 36.17 seconds; upload time was similar (14.02 versus 14.39 seconds),
+while SFTP readback fell from 22.11 to 14.38 seconds. Fetch took 7.08 seconds
+in the first run and 2.30 in the second, but fetch streams over SSH, so the
+SFTP tuning does not explain that difference. Both guarded deletes returned
+remote usage to zero. These were single disposable probes, not Paper
+player-latency measurements. The earlier 180-second publish timeout remains
+unexplained.
+
 With the larger download buffer and hash-guarded single-command cleanup, a
 disposable 651 KiB store restore sequence took 0.50 seconds for the manifest,
 6.00 seconds for fetch, and 0.57 seconds for remote cleanup (7.07 seconds

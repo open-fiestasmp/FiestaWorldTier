@@ -71,6 +71,7 @@ class OpenSSHConfig:
     control_path: Path | None = None
     compression: bool = False
     sftp_download_buffer_size_bytes: int = 262144
+    sftp_max_requests: int = 128
     timeout_seconds: int = 900
     lock_timeout_seconds: int = 30
 
@@ -90,6 +91,8 @@ class OpenSSHConfig:
         if (type(self.sftp_download_buffer_size_bytes) is not int
                 or not 32768 <= self.sftp_download_buffer_size_bytes <= 262144):
             raise ValueError("SFTP download buffer size must be an integer between 32768 and 262144 bytes")
+        if type(self.sftp_max_requests) is not int or not 1 <= self.sftp_max_requests <= 128:
+            raise ValueError("SFTP request window must be an integer between 1 and 128")
         root = self.remote_root
         if (not root.is_absolute() or root.parts[0] != "/" or len(root.parts) < 4
                 or root.parts[1] != "home" or root.parts[2] != self.username):
@@ -180,7 +183,7 @@ class OpenSSHTransport:
 
     def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
         commands = {line.strip().split(maxsplit=1)[0].lower() for line in batch.splitlines() if line.strip()}
-        sftp_options = ["-P", str(self.config.port)]
+        sftp_options = ["-P", str(self.config.port), "-R", str(self.config.sftp_max_requests)]
         # Luna's SFTP server accepts 256 KiB read requests, but rejected larger
         # write packets. Only get-only batches use the tuned download buffer;
         # uploads and mixed batches keep OpenSSH's compatible default.

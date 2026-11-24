@@ -620,7 +620,18 @@ class OpenSSHStoreTests(unittest.TestCase):
             transport.run_sftp("pwd\n")
         arguments = run.call_args.args[0]
         self.assertEqual(arguments[:5], ["sftp", "-b", "-", "-P", str(self.config.port)])
+        self.assertIn("-R", arguments)
+        self.assertIn("128", arguments)
         self.assertNotIn("-B", arguments)
+
+    def test_sftp_request_window_can_be_configured(self):
+        config = OpenSSHConfig(**{**self.config.__dict__, "sftp_max_requests": 64})
+        transport = OpenSSHTransport(config)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("fiesta_world_tier.openssh_store.subprocess.run", return_value=completed) as run:
+            transport.run_sftp("pwd\n")
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[arguments.index("-R") + 1], "64")
 
     def test_sftp_uses_tuned_buffer_for_downloads_but_keeps_upload_default(self):
         transport = OpenSSHTransport(self.config)
@@ -636,6 +647,9 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertIn("262144", download_args)
         self.assertNotIn("-B", upload_args)
         self.assertNotIn("-B", mixed_args)
+        for arguments in (download_args, upload_args, mixed_args):
+            self.assertIn("-R", arguments)
+            self.assertIn("128", arguments)
 
     def test_ssh_stream_splits_exact_file_lengths_and_manifest_trailer(self):
         fake_bin = self.root / "fake-bin"
@@ -723,6 +737,13 @@ class OpenSSHStoreTests(unittest.TestCase):
             with self.subTest(value=value):
                 config = OpenSSHConfig(**{**self.config.__dict__, "sftp_download_buffer_size_bytes": value})
                 with self.assertRaisesRegex(ValueError, "SFTP download buffer size"):
+                    config.validate()
+
+    def test_config_rejects_unsupported_sftp_request_windows(self):
+        for value in (0, 129, True, 1.5):
+            with self.subTest(value=value):
+                config = OpenSSHConfig(**{**self.config.__dict__, "sftp_max_requests": value})
+                with self.assertRaisesRegex(ValueError, "SFTP request window"):
                     config.validate()
 
     def test_transport_enables_private_connection_multiplexing(self):

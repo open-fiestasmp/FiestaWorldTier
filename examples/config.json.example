@@ -23,6 +23,7 @@
     "control_path": "/var/lib/fiesta-world-tier/ssh-control-%C",
     "compression": false,
     "sftp_download_buffer_size_bytes": 262144,
+    "sftp_max_requests": 128,
     "timeout_seconds": 900
   }
 }

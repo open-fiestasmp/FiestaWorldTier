@@ -94,6 +94,7 @@ def _make_manager(config: dict) -> TierManager:
         control_path=Path(remote["control_path"]) if remote.get("control_path") else None,
         compression=remote.get("compression", False),
         sftp_download_buffer_size_bytes=remote.get("sftp_download_buffer_size_bytes", 262144),
+        sftp_max_requests=remote.get("sftp_max_requests", 128),
         timeout_seconds=int(remote.get("timeout_seconds", 900)),
     )
     store = OpenSSHObjectStore(store_config)
