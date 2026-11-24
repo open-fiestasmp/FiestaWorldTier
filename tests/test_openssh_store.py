@@ -269,6 +269,17 @@ class InterruptingUploadOpenSSH(FakeOpenSSH):
         return super().run_sftp(batch)
 
 
+class TimedOutUploadOpenSSH(FakeOpenSSH):
+    def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        partial = []
+        for line in batch.splitlines():
+            partial.append(line)
+            if shlex.split(line)[0] == "put":
+                super().run_sftp("\n".join(partial) + "\n")
+                raise TransientSFTPError("simulated SFTP operation timeout", retryable=False)
+        return super().run_sftp(batch)
+
+
 class MidFileDisconnectOpenSSH(FakeOpenSSH):
     def __init__(self, root: Path):
         super().__init__(root)
@@ -732,6 +743,22 @@ class OpenSSHStoreTests(unittest.TestCase):
                 transport.stream_remote_files(["/remote/manifest"], [(self.root / "timeout", None)])
         self.assertFalse(raised.exception.retryable)
 
+    def test_sftp_process_timeout_is_not_retried(self):
+        fake_bin = self.root / "sftp-timeout-bin"
+        fake_bin.mkdir()
+        fake_sftp = fake_bin / "sftp"
+        fake_sftp.write_text(
+            "#!/usr/bin/env python3\nimport time\ntime.sleep(2)\n",
+            encoding="utf-8",
+        )
+        fake_sftp.chmod(0o755)
+        config = OpenSSHConfig(**{**self.config.__dict__, "timeout_seconds": 1})
+        transport = OpenSSHTransport(config)
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}):
+            with self.assertRaisesRegex(TransientSFTPError, "timed out") as raised:
+                transport.run_sftp("pwd\n")
+        self.assertFalse(raised.exception.retryable)
+
     def test_config_rejects_unsupported_sftp_buffer_sizes(self):
         for value in (32767, 262145, True):
             with self.subTest(value=value):
@@ -907,6 +934,21 @@ class OpenSSHStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(TransientSFTPError, "partial upload"):
             store.publish(self.key, files)
 
+        self.assertFalse(store.object_exists(self.key))
+        self.assertEqual(list(transport.path(str(store.staging)).iterdir()), [])
+        self.assertFalse(transport.path(str(store.lock_path)).exists())
+        self.assertEqual(store.usage(), 0)
+        self.assertTrue(all(path.is_file() for path in files.values()))
+
+    def test_timed_out_upload_cleans_staging_and_keeps_local_bundle(self):
+        transport = TimedOutUploadOpenSSH(self.root / "timed-out-remote")
+        store = OpenSSHObjectStore(self.config, transport)
+        files = self.create_bundle()
+
+        with self.assertRaisesRegex(TransientSFTPError, "operation timeout") as raised:
+            store.publish(self.key, files)
+
+        self.assertFalse(raised.exception.retryable)
         self.assertFalse(store.object_exists(self.key))
         self.assertEqual(list(transport.path(str(store.staging)).iterdir()), [])
         self.assertFalse(transport.path(str(store.lock_path)).exists())

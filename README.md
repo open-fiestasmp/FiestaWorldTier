@@ -13,8 +13,8 @@ The prototype models the durable transfer state machine and tests it against
 disposable worlds and a local object-store fixture. It includes an optional
 OpenSSH adapter that requires a pinned host key and a restricted-permission
 identity file. Uploads use SFTP; verified restores stream over SSH. Automated
-transport tests use a local fake, including a synthetic mid-file SFTP
-interruption that must remove staging data and leave the local bundle intact. A disposable
+transport tests use a local fake, including an interrupted or timed-out SFTP
+upload that must remove staging data and leave the local bundle intact. A disposable
 Luna SFTP run also interrupted the bundle after its first member; staging was
 empty afterward, no object was published, the writer lock was released, and
 the local source was unchanged. A separate disposable publisher process was
