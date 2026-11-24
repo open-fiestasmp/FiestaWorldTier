@@ -144,6 +144,17 @@ After this change, a real 1,048,607-byte synthetic Luna transfer completed in
 SHA-256 matched, the remote object was deleted, and the unique test root was
 removed. This was a clean transfer with no retry needed.
 
+One later multiplexed publish timed out after 180 seconds and left no object;
+that failure's cause is still unknown. Two bounded 1.16 MiB SFTP round trips
+then completed against fresh 5 MB test roots. Publish took 23.2 seconds, made
+up of a 7.9-second upload batch, 7.9-second remote readback verification, and
+1.8-second staged rename. Verified fetch, hash checks, and deletion also passed.
+The second run deliberately used a local source filename that differed from
+its bundle path; the manifest now records the bundle member name and the
+round-trip passed. Both test roots were removed. These successful retries do
+not prove the earlier timeout is fixed or establish a production latency
+target.
+
 ### Streamed restore measurement
 
 A disposable 4 MiB transfer benchmark on Luna measured warmed median times of

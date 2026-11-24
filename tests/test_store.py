@@ -109,6 +109,22 @@ class RegionTierTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(self.lease.calls, 2)
 
+    def test_publish_manifest_uses_bundle_member_name(self):
+        files = RegionBundle(self.root, self.key).files()
+        renamed_source = self.root / "renamed-entity-source.tmp"
+        renamed_source.write_bytes(files["entities/r.-2.5.mca"].read_bytes())
+        files["entities/r.-2.5.mca"] = renamed_source
+
+        manifest, _digest = self.store.publish(self.key, files)
+
+        self.assertEqual(manifest["files"]["entities/r.-2.5.mca"]["name"], "r.-2.5.mca")
+        restored = self.root / "renamed-source-restore"
+        self.assertEqual(self.store.fetch(self.key, restored), manifest)
+        self.assertEqual(
+            (restored / "entities/r.-2.5.mca").read_bytes(),
+            renamed_source.read_bytes(),
+        )
+
     def test_manifest_accepts_external_sidecars_for_every_region_component(self):
         for component in ("region", "entities", "poi"):
             self.assertTrue(self.store._valid_member(self.key, f"{component}/c.-64.160.mcc"))

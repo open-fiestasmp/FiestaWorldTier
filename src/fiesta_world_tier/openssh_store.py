@@ -598,7 +598,7 @@ class OpenSSHObjectStore:
                     st = source.stat()
                     before[member] = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
                     manifest_files[member] = {
-                        "name": source.name,
+                        "name": PurePosixPath(member).name,
                         "size": st.st_size,
                         "sha256": self._hash(source),
                     }

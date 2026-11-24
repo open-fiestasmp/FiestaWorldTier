@@ -191,7 +191,7 @@ class DirectoryObjectStore:
                 stat = source.stat()
                 before[member] = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
                 manifest_files[member] = {
-                    "name": source.name,
+                    "name": PurePosixPath(member).name,
                     "size": stat.st_size,
                     "sha256": self._hash(source),
                 }

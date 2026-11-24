@@ -358,6 +358,24 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertEqual(self.transport.sftp_batches, [])
         self.assertEqual(self.store.usage(), 0)
 
+    def test_publish_manifest_uses_bundle_member_name(self):
+        files = self.create_bundle()
+        member = "entities/r.-2.5.mca"
+        renamed_source = self.root / "renamed-entity-source.tmp"
+        renamed_source.write_bytes(files[member].read_bytes())
+        files[member] = renamed_source
+
+        manifest, digest = self.store.publish(self.key, files)
+
+        self.assertEqual(manifest["files"][member]["name"], "r.-2.5.mca")
+        self.assertEqual(self.store.verify(self.key), manifest)
+        restored = self.root / "renamed-source-restore"
+        self.assertEqual(
+            self.store.fetch(self.key, restored, expected_manifest=manifest, expected_manifest_hash=digest),
+            manifest,
+        )
+        self.assertEqual((restored / member).read_bytes(), renamed_source.read_bytes())
+
     def test_verified_fetch_batches_bundle_and_manifest_recheck(self):
         files = self.create_bundle()
         generation, digest = self.store.publish(self.key, files)
