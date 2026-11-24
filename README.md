@@ -246,6 +246,16 @@ enabled, SSH connection multiplexing uses a `%C` socket path in a private
 directory (mode `0700`) to avoid a new network handshake for every metadata
 operation.
 
+## Restore space-failure fixture
+
+The local suite injects `ENOSPC` after a partial member download and while the
+second staged member is being published. In both cases the region stays marked
+for restore, the verified remote bundle remains available, and the temporary
+restore directory is removed. A retry then restores and verifies the original
+bundle. These are injected failures in the Python store fixture; they do not
+replace a full-filesystem test or a Paper runtime test. No Fiesta world data is
+used.
+
 ## Proposed production design
 
 See [DESIGN.md](DESIGN.md), the

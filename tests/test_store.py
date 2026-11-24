@@ -3,10 +3,12 @@ from __future__ import annotations
 import sys
 import os
 import json
+import errno
 import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -333,6 +335,67 @@ class RegionTierTests(unittest.TestCase):
             manager.restore(self.key)
         self.assertEqual(manager.state(self.key), "REMOTE_ONLY")
         self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+
+    def test_restore_cleans_partial_stage_and_retries_after_enospc(self):
+        self.manager.offload(self.key)
+        marker = self.root / "world/.world-tier/remote/r.-2.5.json"
+
+        def fail_during_copy(source, destination, length=1024 * 1024):
+            destination.write(source.read(5))
+            raise OSError(errno.ENOSPC, "fixture disk full")
+
+        with patch("fiesta_world_tier.store.shutil.copyfileobj", side_effect=fail_during_copy):
+            with self.assertRaisesRegex(OSError, "fixture disk full"):
+                self.manager.restore(self.key)
+
+        self.assertEqual(self.manager.state(self.key), "RESTORING")
+        self.assertEqual(json.loads(marker.read_text())["state"], "RESTORING")
+        self.assertTrue(self.store.object_exists(self.key))
+        self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+        self.assertEqual(list((self.root / ".world-tier-stage").iterdir()), [])
+
+        self.manager.recover(self.key)
+
+        self.assertEqual(self.manager.state(self.key), "LOCAL_ONLY")
+        self.assertEqual(self.local_contents()["region/r.-2.5.mca"], b"terrain region bytes")
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.store.object_exists(self.key))
+
+    def test_restore_recovers_when_enospc_interrupts_member_publication(self):
+        original = self.local_contents()
+        self.manager.offload(self.key)
+        marker = self.root / "world/.world-tier/remote/r.-2.5.json"
+        stage_root = (self.root / ".world-tier-stage").resolve()
+        replace = os.replace
+        staged_moves = 0
+
+        def fail_on_second_stage_move(source, destination):
+            nonlocal staged_moves
+            source_path = Path(source)
+            if source_path.resolve().is_relative_to(stage_root):
+                staged_moves += 1
+                if staged_moves == 2:
+                    raise OSError(errno.ENOSPC, "fixture directory full")
+            return replace(source, destination)
+
+        with patch("fiesta_world_tier.store.os.replace", side_effect=fail_on_second_stage_move):
+            with self.assertRaisesRegex(OSError, "fixture directory full"):
+                self.manager.restore(self.key)
+
+        self.assertEqual(staged_moves, 2)
+        self.assertEqual(self.manager.state(self.key), "RESTORING")
+        self.assertEqual(json.loads(marker.read_text())["state"], "RESTORING")
+        self.assertTrue(self.store.object_exists(self.key))
+        self.assertFalse((self.root / "world/region/r.-2.5.mca").exists())
+        self.assertTrue((self.root / "world/entities/r.-2.5.mca").is_file())
+        self.assertEqual(list(stage_root.iterdir()), [])
+
+        self.manager.recover(self.key)
+
+        self.assertEqual(self.manager.state(self.key), "LOCAL_ONLY")
+        self.assertEqual(self.local_contents(), original)
+        self.assertFalse(marker.exists())
+        self.assertFalse(self.store.object_exists(self.key))
 
     def test_manifest_change_during_fetch_never_publishes_local_data(self):
         store = MutatingManifestStore(Path(self.temp.name) / "mutating", max_bytes=10_000_000)
