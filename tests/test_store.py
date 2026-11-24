@@ -114,6 +114,33 @@ class RegionTierTests(unittest.TestCase):
             self.assertTrue(self.store._valid_member(self.key, f"{component}/c.-64.160.mcc"))
             self.assertFalse(self.store._valid_member(self.key, f"{component}/c.0.0.mcc"))
 
+    def test_nether_and_end_bundles_restore_all_components_and_sidecars(self):
+        for dimension, world_path in (
+            ("nether", "world_nether/DIM-1"),
+            ("end", "world_the_end/DIM1"),
+        ):
+            key = RegionKey(dimension, -2, 5)
+            root = self.root / world_path
+            expected = {}
+            for component in ("region", "entities", "poi"):
+                for filename in ("r.-2.5.mca", "c.-64.160.mcc"):
+                    path = root / component / filename
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    content = f"{dimension}/{component}/{filename}".encode()
+                    path.write_bytes(content)
+                    expected[f"{component}/{filename}"] = content
+
+            self.assertEqual(
+                {member: path.read_bytes() for member, path in RegionBundle(self.root, key).files().items()},
+                expected,
+            )
+            self.manager.offload(key)
+            self.assertEqual(self.manager.state(key), "REMOTE_ONLY")
+            self.manager.restore(key)
+            self.assertEqual(self.manager.state(key), "LOCAL_ONLY")
+            restored = RegionBundle(self.root, key).files()
+            self.assertEqual({member: path.read_bytes() for member, path in restored.items()}, expected)
+
     def test_staged_offload_releases_lease_during_publish_and_finalizes_unchanged_bundle(self):
         original = self.local_contents()
         self.manager.record_access(self.key, when=100)
