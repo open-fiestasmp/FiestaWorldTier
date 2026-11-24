@@ -346,7 +346,9 @@ class PaperLeaseCliTests(unittest.TestCase):
                 self.arguments = None
                 self.store = type("FakeStore", (), {
                     "max_bytes": 10_000,
+                    "minimum_free_bytes": 1000,
                     "usage_snapshot": lambda _self: 250,
+                    "available_snapshot": lambda _self: 5000,
                 })()
 
             def catalog_local_regions(self, trust_atime=False):
@@ -386,7 +388,7 @@ class PaperLeaseCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(manager.catalog_calls, 1)
         self.assertFalse(manager.trust_atime)
-        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set(), 9750, 1))
+        self.assertEqual(manager.arguments, (1024, 30 * 86_400, set(), 4000, 1))
         self.assertEqual(payload["selected"], [{
             "dimension": "overworld",
             "region_x": -1,
@@ -400,8 +402,13 @@ class PaperLeaseCliTests(unittest.TestCase):
         self.assertFalse(payload["automatic_eviction_enabled"])
         self.assertTrue(payload["requires_paper_region_lease_before_each_offload"])
         self.assertEqual(payload["remote_usage_bytes"], 250)
-        self.assertEqual(payload["remote_available_bytes"], 9750)
+        self.assertEqual(payload["remote_available_bytes"], 4000)
+        self.assertEqual(payload["remote_quota_headroom_bytes"], 9750)
+        self.assertEqual(payload["remote_filesystem_free_bytes"], 5000)
+        self.assertEqual(payload["remote_minimum_free_bytes"], 1000)
+        self.assertEqual(payload["remote_free_headroom_bytes"], 4000)
         self.assertTrue(payload["remote_usage_snapshot_is_advisory"])
+        self.assertTrue(payload["remote_free_snapshot_is_advisory"])
 
         config_payload = json.loads(self.config.read_text(encoding="utf-8"))
         config_payload["trust_filesystem_atime"] = True
@@ -456,10 +463,15 @@ class StorageCliTests(unittest.TestCase):
 
         class FakeStore:
             max_bytes = 1000
+            minimum_free_bytes = 100
 
             @staticmethod
             def usage_snapshot():
                 return 300
+
+            @staticmethod
+            def available_snapshot():
+                return 900
 
         manager = type("FakeManager", (), {"store": FakeStore()})()
         args = build_parser().parse_args(["storage", "--config", str(self.config)])
@@ -478,6 +490,10 @@ class StorageCliTests(unittest.TestCase):
         )
         self.assertEqual(payload["remote_quota_bytes"], 1000)
         self.assertEqual(payload["remote_available_bytes"], 700)
+        self.assertEqual(payload["remote_filesystem_free_bytes"], 900)
+        self.assertEqual(payload["remote_minimum_free_bytes"], 100)
+        self.assertEqual(payload["remote_free_headroom_bytes"], 800)
+        self.assertTrue(payload["remote_free_snapshot_is_advisory"])
         self.assertTrue(payload["remote_usage_includes_staging"])
         self.assertTrue(payload["remote_usage_snapshot_is_advisory"])
         self.assertFalse(payload["mutated_world_or_remote_data"])

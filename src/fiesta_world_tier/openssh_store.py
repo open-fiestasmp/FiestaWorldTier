@@ -67,6 +67,7 @@ class OpenSSHConfig:
     known_hosts: Path
     remote_root: PurePosixPath
     max_bytes: int
+    minimum_free_bytes: int = 0
     control_path: Path | None = None
     compression: bool = False
     sftp_download_buffer_size_bytes: int = 262144
@@ -82,6 +83,8 @@ class OpenSSHConfig:
             raise ValueError("SSH port must be between 1 and 65535")
         if self.max_bytes <= 0 or self.timeout_seconds <= 0 or self.lock_timeout_seconds <= 0:
             raise ValueError("size and timeout limits must be positive")
+        if type(self.minimum_free_bytes) is not int or self.minimum_free_bytes < 0:
+            raise ValueError("minimum_free_bytes must be a non-negative integer")
         if type(self.compression) is not bool:
             raise ValueError("compression must be a boolean")
         if (type(self.sftp_download_buffer_size_bytes) is not int
@@ -368,6 +371,7 @@ class OpenSSHObjectStore:
         config.validate()
         self.config = config
         self.max_bytes = config.max_bytes
+        self.minimum_free_bytes = config.minimum_free_bytes
         self.root = config.remote_root
         self.objects = self.root / "objects"
         self.staging = self.root / ".staging"
@@ -512,6 +516,21 @@ class OpenSSHObjectStore:
         except (IndexError, ValueError) as exc:
             raise TierError("remote storage usage response is invalid") from exc
 
+    def available_snapshot(self) -> int:
+        """Return free bytes on the remote root's filesystem without changing it."""
+        root = shlex.quote(str(self.root))
+        home = shlex.quote(f"/home/{self.config.username}")
+        result = self._ssh(
+            f"if [ -L {root} ]; then exit 2; "
+            f"elif [ -e {root} ] && [ -d {root} ]; then df -B1 --output=avail -- {root}; "
+            f"elif [ -e {root} ]; then exit 3; "
+            f"else df -B1 --output=avail -- {home}; fi"
+        )
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if len(lines) != 2 or lines[0].lower() != "avail" or not lines[1].isdecimal():
+            raise TierError("remote filesystem free-space response is invalid")
+        return int(lines[1])
+
     def _usage_unlocked(self) -> int:
         result = self._ssh(
             "du -sb -- " + shlex.quote(str(self.objects)) + " " + shlex.quote(str(self.staging))
@@ -627,6 +646,9 @@ class OpenSSHObjectStore:
                     raise TierError(f"remote object already exists with different contents: {key.name}")
                 if self._usage_unlocked() + total > self.max_bytes:
                     raise TierError("remote storage quota would be exceeded")
+                if (self.minimum_free_bytes
+                        and self.available_snapshot() - total < self.minimum_free_bytes):
+                    raise TierError("remote filesystem free-space reserve would be crossed")
 
                 stage = self.staging / f"{key.dimension}-r.{key.x}.{key.z}-{uuid.uuid4().hex}"
                 stage_s = self._remote_path(stage)

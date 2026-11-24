@@ -31,6 +31,8 @@ class FakeOpenSSH:
     def __init__(self, root: Path):
         self.root = root
         self.root.mkdir()
+        self.path("/home/fiesta").mkdir(parents=True)
+        self.available_bytes = 1_000_000_000_000
         self.sftp_batches: list[str] = []
         self.ssh_commands: list[str] = []
         self.stream_calls: list[tuple[list[str], list[tuple[Path, int | None]]]] = []
@@ -48,6 +50,21 @@ class FakeOpenSSH:
     def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         self.ssh_commands.append(command)
         output = ""
+        if command.startswith("if [ -L ") and "df -B1 --output=avail -- " in command:
+            match = re.match(r"if \[ -L (.*?) \];", command)
+            fallback = re.search(r"else df -B1 --output=avail -- (.*?); fi$", command)
+            if match is None or fallback is None:
+                raise AssertionError("unexpected filesystem space query")
+            remote_root = shlex.split(match.group(1))[0]
+            root = self.path(remote_root)
+            if root.is_symlink():
+                return self.result(2, error="remote path is a symlink")
+            if root.exists() and not root.is_dir():
+                return self.result(3, error="remote path is not a directory")
+            home = self.path(shlex.split(fallback.group(1))[0])
+            if not home.exists():
+                return self.result(1, error="remote home is missing")
+            return self.result(output=f"Avail\n{self.available_bytes}\n")
         if command.startswith("set -eu; "):
             assignments = {}
             for part in command.split("; "):
@@ -558,6 +575,12 @@ class OpenSSHStoreTests(unittest.TestCase):
         expected = self.store.usage()
         self.assertEqual(self.store.usage_snapshot(), expected)
 
+    def test_available_snapshot_uses_existing_home_without_creating_tier_root(self):
+        self.assertEqual(self.store.available_snapshot(), self.transport.available_bytes)
+        self.assertFalse(self.transport.path(str(self.store.root)).exists())
+        self.assertFalse(self.transport.path(str(self.store.objects)).exists())
+        self.assertFalse(self.transport.path(str(self.store.staging)).exists())
+
     def test_usage_snapshot_rejects_a_symlinked_remote_root(self):
         remote_root = self.transport.path(str(self.store.root))
         remote_root.parent.mkdir(parents=True, exist_ok=True)
@@ -814,6 +837,32 @@ class OpenSSHStoreTests(unittest.TestCase):
             store.publish(self.key, self.create_bundle())
         self.assertFalse(store._exists(store._object_path(self.key)))
 
+    def test_free_space_reserve_rejection_leaves_local_bundle_and_no_remote_object(self):
+        config = OpenSSHConfig(**{**self.config.__dict__, "minimum_free_bytes": 1_000_000})
+        transport = FakeOpenSSH(self.root / "reserve-remote")
+        transport.available_bytes = 1_000_000
+        store = OpenSSHObjectStore(config, transport)
+        files = self.create_bundle()
+
+        with self.assertRaisesRegex(TierError, "free-space reserve"):
+            store.publish(self.key, files)
+
+        self.assertFalse(store._exists(store._object_path(self.key)))
+        self.assertEqual(list(transport.path(str(store.staging)).iterdir()), [])
+        self.assertFalse(transport.path(str(store.lock_path)).exists())
+        self.assertTrue(all(path.is_file() for path in files.values()))
+
+    def test_free_space_reserve_allows_publish_with_headroom(self):
+        config = OpenSSHConfig(**{**self.config.__dict__, "minimum_free_bytes": 100})
+        transport = FakeOpenSSH(self.root / "reserve-boundary-remote")
+        store = OpenSSHObjectStore(config, transport)
+        files = self.create_bundle()
+        transport.available_bytes = 100 + sum(path.stat().st_size for path in files.values()) + 1024
+
+        store.publish(self.key, files)
+
+        self.assertTrue(store.object_exists(self.key))
+
     def test_corrupt_remote_member_fails_checksum_verification(self):
         files = self.create_bundle()
         self.store.publish(self.key, files)
@@ -869,6 +918,11 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.config.identity_file.chmod(0o644)
         with self.assertRaisesRegex(ValueError, "permissions"):
             self.config.validate()
+
+    def test_config_rejects_invalid_minimum_free_bytes(self):
+        for value in (-1, True, 1.5):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "minimum_free_bytes"):
+                OpenSSHConfig(**{**self.config.__dict__, "minimum_free_bytes": value}).validate()
 
     def test_config_rejects_insecure_control_socket_directory(self):
         directory = self.root / "shared"

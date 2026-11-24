@@ -90,6 +90,7 @@ def _make_manager(config: dict) -> TierManager:
         known_hosts=Path(remote["known_hosts"]),
         remote_root=PurePosixPath(remote["remote_root"]),
         max_bytes=int(remote["max_bytes"]),
+        minimum_free_bytes=remote.get("minimum_free_bytes", 0),
         control_path=Path(remote["control_path"]) if remote.get("control_path") else None,
         compression=remote.get("compression", False),
         sftp_download_buffer_size_bytes=remote.get("sftp_download_buffer_size_bytes", 262144),
@@ -255,12 +256,18 @@ def storage(args: argparse.Namespace) -> None:
     store = _make_manager(config).store
     remote_bytes = store.usage_snapshot()
     remote_quota_bytes = store.max_bytes
+    remote_filesystem_free_bytes = store.available_snapshot()
+    remote_minimum_free_bytes = store.minimum_free_bytes
     print(json.dumps({
         "local_world_bytes": local_world_bytes,
         "remote_tier_store_bytes": remote_bytes,
         "combined_world_storage_bytes": local_world_bytes + remote_bytes,
         "remote_quota_bytes": remote_quota_bytes,
         "remote_available_bytes": max(0, remote_quota_bytes - remote_bytes),
+        "remote_filesystem_free_bytes": remote_filesystem_free_bytes,
+        "remote_minimum_free_bytes": remote_minimum_free_bytes,
+        "remote_free_headroom_bytes": max(0, remote_filesystem_free_bytes - remote_minimum_free_bytes),
+        "remote_free_snapshot_is_advisory": True,
         "remote_usage_includes_staging": True,
         "remote_usage_snapshot_is_advisory": True,
         "mutated_world_or_remote_data": False,
@@ -303,7 +310,16 @@ def plan(args: argparse.Namespace) -> None:
     stale_snapshots_cleaned = manager.cleanup_stale_offload_snapshots()
     remote_usage_bytes = manager.store.usage_snapshot()
     remote_quota_bytes = manager.store.max_bytes
-    remote_available_bytes = max(0, remote_quota_bytes - remote_usage_bytes)
+    remote_quota_headroom_bytes = max(0, remote_quota_bytes - remote_usage_bytes)
+    remote_minimum_free_bytes = manager.store.minimum_free_bytes
+    remote_filesystem_free_bytes = None
+    remote_free_headroom_bytes = None
+    if remote_minimum_free_bytes:
+        remote_filesystem_free_bytes = manager.store.available_snapshot()
+        remote_free_headroom_bytes = max(0, remote_filesystem_free_bytes - remote_minimum_free_bytes)
+        remote_available_bytes = min(remote_quota_headroom_bytes, remote_free_headroom_bytes)
+    else:
+        remote_available_bytes = remote_quota_headroom_bytes
     result = manager.plan_local_budget(
         target_bytes,
         float(age_days) * 86_400,
@@ -330,7 +346,12 @@ def plan(args: argparse.Namespace) -> None:
         "remote_usage_bytes": remote_usage_bytes,
         "remote_quota_bytes": remote_quota_bytes,
         "remote_available_bytes": remote_available_bytes,
+        "remote_quota_headroom_bytes": remote_quota_headroom_bytes,
+        "remote_filesystem_free_bytes": remote_filesystem_free_bytes,
+        "remote_minimum_free_bytes": remote_minimum_free_bytes,
+        "remote_free_headroom_bytes": remote_free_headroom_bytes,
         "remote_usage_snapshot_is_advisory": True,
+        "remote_free_snapshot_is_advisory": bool(remote_minimum_free_bytes),
         "requires_paper_region_lease_before_each_offload": True,
         "stale_offload_snapshots_cleaned": stale_snapshots_cleaned,
         "automatic_eviction_enabled": False,

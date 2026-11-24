@@ -100,9 +100,13 @@ latency gate remains open.
 
 The OpenSSH adapter enforces a configured application byte cap across its
 objects and staging directories; this is not an OS-level filesystem quota.
-Use a server-side quota as a second limit where the host supports it. A sample
-deployment caps region objects at 80,000,000,000 bytes and leaves additional
-capacity for proxy and system data. The companion Paper 1.21.11 patch provides
+`remote.minimum_free_bytes` adds a free-space floor: the planner subtracts that
+reserve, and each publish checks it again while holding the store's writer
+lock. The check protects against Fiesta's own concurrent uploads, but other
+users of the filesystem can still consume space between the check and write.
+Use an OS-enforced quota as the hard limit where the host supports it. The
+example uses a 50 GB object cap and leaves a 40 GB filesystem reserve. The
+companion Paper 1.21.11 patch provides
 marked demand restore, per-region I/O leases, and an experimental
 `offloadRegion(...)` API that copies a bundle under a short Paper lease, uploads
 the independent copy without the lease, then reacquires the lease to verify
