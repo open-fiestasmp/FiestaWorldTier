@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import json
 import io
+import sqlite3
 import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fiesta_world_tier.cli import _dimension_config, _read_marker, main
+from fiesta_world_tier.cli import (
+    _dimension_config,
+    _journal_region_state,
+    _read_marker,
+    main,
+    recover_if_remote,
+    region_state,
+)
 from fiesta_world_tier.leases import FileRegionLease
 from fiesta_world_tier import RegionKey, TierError
 from fiesta_world_tier.openssh_store import TransientSSHError
@@ -70,6 +78,171 @@ class RestoreCliTests(unittest.TestCase):
         (marker_dir / "r.0.0.json").symlink_to(outside)
         with self.assertRaisesRegex(TierError, "missing or invalid"):
             _read_marker(self.world, RegionKey("overworld", 0, 0), "minecraft:overworld")
+
+    def test_journal_state_distinguishes_remote_local_and_untracked_regions(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.executemany(
+                "INSERT INTO regions VALUES(?,?,?,?)",
+                [("overworld", 1, 2, "REMOTE_ONLY"), ("overworld", 3, 4, "LOCAL_ONLY")],
+            )
+            db.commit()
+        config = {"journal": str(journal)}
+        self.assertEqual(_journal_region_state(config, RegionKey("overworld", 1, 2)), "REMOTE_ONLY")
+        self.assertEqual(_journal_region_state(config, RegionKey("overworld", 3, 4)), "LOCAL_ONLY")
+        self.assertIsNone(_journal_region_state(config, RegionKey("overworld", 5, 6)))
+
+    def test_region_state_reports_missing_marker_from_journal(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.executemany(
+                "INSERT INTO regions VALUES(?,?,?,?)",
+                [("overworld", 1, 2, "REMOTE_ONLY"), ("overworld", 3, 4, "LOCAL_ONLY")],
+            )
+            db.commit()
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(json.dumps({
+            "server_root": str(self.server_root),
+            "journal": str(journal),
+            "dimensions": {"minecraft:overworld": "world"},
+        }), encoding="utf-8")
+        config_path.chmod(0o600)
+        args = type("Args", (), {
+            "config": str(config_path), "dimension_key": "minecraft:overworld",
+            "dimension_root": str(self.world), "region_x": 1, "region_z": 2,
+        })()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            region_state(args)
+        self.assertEqual(output.getvalue().strip(), "REMOTE")
+
+        (self.world / "region").mkdir()
+        (self.world / "region" / "r.3.4.mca").write_bytes(b"local")
+        args.region_x, args.region_z = 3, 4
+        output = io.StringIO()
+        with redirect_stdout(output):
+            region_state(args)
+        self.assertEqual(output.getvalue().strip(), "LOCAL")
+
+        args.region_x, args.region_z = 7, 8
+        output = io.StringIO()
+        with redirect_stdout(output):
+            region_state(args)
+        self.assertEqual(output.getvalue().strip(), "UNTRACKED")
+
+    def test_recovery_refuses_missing_tracked_local_region(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.execute("INSERT INTO regions VALUES(?,?,?,?)", ("overworld", 3, 4, "LOCAL_ONLY"))
+            db.commit()
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(json.dumps({
+            "server_root": str(self.server_root),
+            "journal": str(journal),
+            "dimensions": {"minecraft:overworld": "world"},
+        }), encoding="utf-8")
+        config_path.chmod(0o600)
+        args = type("Args", (), {
+            "config": str(config_path), "dimension_key": "minecraft:overworld",
+            "dimension_root": str(self.world), "region_x": 3, "region_z": 4,
+        })()
+        with patch("fiesta_world_tier.cli._make_manager") as make_manager:
+            with self.assertRaisesRegex(TierError, "refusing to create an empty replacement"):
+                recover_if_remote(args)
+            make_manager.assert_not_called()
+
+    def test_recovery_keeps_local_terrain_without_opening_remote_store(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.execute("INSERT INTO regions VALUES(?,?,?,?)", ("overworld", 3, 4, "LOCAL_ONLY"))
+            db.commit()
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(json.dumps({
+            "server_root": str(self.server_root),
+            "journal": str(journal),
+            "dimensions": {"minecraft:overworld": "world"},
+        }), encoding="utf-8")
+        config_path.chmod(0o600)
+        args = type("Args", (), {
+            "config": str(config_path), "dimension_key": "minecraft:overworld",
+            "dimension_root": str(self.world), "region_x": 3, "region_z": 4,
+        })()
+        terrain = self.world / "region" / "r.3.4.mca"
+        terrain.parent.mkdir(parents=True)
+        terrain.write_bytes(b"local terrain")
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager") as make_manager:
+            with redirect_stdout(output):
+                recover_if_remote(args)
+            make_manager.assert_not_called()
+        self.assertEqual(output.getvalue().strip(), "LOCAL")
+
+    def test_recovery_allows_a_truly_untracked_region(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.commit()
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(json.dumps({
+            "server_root": str(self.server_root),
+            "journal": str(journal),
+            "dimensions": {"minecraft:overworld": "world"},
+        }), encoding="utf-8")
+        config_path.chmod(0o600)
+        args = type("Args", (), {
+            "config": str(config_path), "dimension_key": "minecraft:overworld",
+            "dimension_root": str(self.world), "region_x": 3, "region_z": 4,
+        })()
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager") as make_manager:
+            with redirect_stdout(output):
+                recover_if_remote(args)
+            make_manager.assert_not_called()
+        self.assertEqual(output.getvalue().strip(), "UNTRACKED")
+
+    def test_recovery_restores_a_remote_region_even_without_its_marker(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.execute("INSERT INTO regions VALUES(?,?,?,?)", ("overworld", 3, 4, "REMOTE_ONLY"))
+            db.commit()
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(json.dumps({
+            "server_root": str(self.server_root),
+            "journal": str(journal),
+            "dimensions": {"minecraft:overworld": "world"},
+        }), encoding="utf-8")
+        config_path.chmod(0o600)
+        args = type("Args", (), {
+            "config": str(config_path), "dimension_key": "minecraft:overworld",
+            "dimension_root": str(self.world), "region_x": 3, "region_z": 4,
+        })()
+
+        class FakeManager:
+            def recover(self, key):
+                self.assert_key = key
+                region = self.world / "region" / f"r.{key.x}.{key.z}.mca"
+                region.parent.mkdir(parents=True, exist_ok=True)
+                region.write_bytes(b"restored terrain")
+
+        manager = FakeManager()
+        manager.world = self.world
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager", return_value=manager):
+            with redirect_stdout(output):
+                recover_if_remote(args)
+        self.assertEqual(manager.assert_key, RegionKey("overworld", 3, 4))
+        self.assertEqual(output.getvalue().strip(), "LOCAL")
+        self.assertEqual((self.world / "region" / "r.3.4.mca").read_bytes(), b"restored terrain")
+
+    def test_region_state_refuses_a_missing_journal(self):
+        with self.assertRaisesRegex(TierError, "journal is missing"):
+            _journal_region_state({"journal": str(Path(self.temp.name) / "missing.sqlite3")},
+                                  RegionKey("overworld", 0, 0))
 
     def test_retryable_remote_transfer_errors_use_temporary_failure_exit_code(self):
         from argparse import Namespace

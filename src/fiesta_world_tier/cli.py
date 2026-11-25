@@ -6,9 +6,11 @@ import math
 import os
 import re
 import stat
+import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 from .leases import FileRegionLease
@@ -76,6 +78,85 @@ def _read_marker(dimension_root: Path, key: RegionKey, dimension_key: str) -> st
             or not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("manifest_sha256", "")))):
         raise TierError("cold-region marker identity or checksum is invalid")
     return payload["manifest_sha256"]
+
+
+def _journal_region_state(config: dict, key: RegionKey) -> str | None:
+    journal = Path(config["journal"]).absolute()
+    if journal.is_symlink() or not journal.is_file():
+        raise TierError("world-tier journal is missing or unsafe")
+    try:
+        with closing(sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            row = db.execute(
+                "SELECT state FROM regions WHERE dimension=? AND x=? AND z=?",
+                (key.dimension, key.x, key.z),
+            ).fetchone()
+    except (OSError, sqlite3.Error) as exc:
+        raise TierError("world-tier journal could not be read") from exc
+    if row is None:
+        return None
+    state = row[0]
+    if state not in ("LOCAL_ONLY", "UPLOADING", "EVICTING", "REMOTE_ONLY", "RESTORING", "CACHED"):
+        raise TierError("world-tier journal contains an unknown region state")
+    return state
+
+
+def region_state(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    logical_dimension, dimension_root = _dimension_config(
+        config, args.dimension_key, Path(args.dimension_root)
+    )
+    key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    state = _journal_region_state(config, key)
+    terrain = dimension_root / "region" / f"r.{key.x}.{key.z}.mca"
+    if terrain.is_symlink():
+        raise TierError("terrain region path is a symbolic link")
+    if state is None:
+        print("LOCAL" if _regular_terrain(terrain) else "UNTRACKED")
+    elif state in ("EVICTING", "REMOTE_ONLY", "RESTORING"):
+        print("REMOTE")
+    elif state == "CACHED" and not _regular_terrain(terrain):
+        print("REMOTE")
+    elif _regular_terrain(terrain):
+        print("LOCAL")
+    else:
+        print("TRACKED_MISSING")
+
+
+def recover_if_remote(args: argparse.Namespace) -> None:
+    config = _private_json(Path(args.config).absolute())
+    logical_dimension, dimension_root = _dimension_config(
+        config, args.dimension_key, Path(args.dimension_root)
+    )
+    key = RegionKey(logical_dimension, args.region_x, args.region_z)
+    state = _journal_region_state(config, key)
+    terrain = dimension_root / "region" / f"r.{key.x}.{key.z}.mca"
+    if state is None:
+        if terrain.is_symlink():
+            raise TierError("terrain region path is a symbolic link")
+        print("LOCAL" if _regular_terrain(terrain) else "UNTRACKED")
+        return
+
+    if state in ("EVICTING", "REMOTE_ONLY", "RESTORING"):
+        _make_manager(config).recover(key)
+    elif state == "CACHED" and not _regular_terrain(terrain):
+        manager = _make_manager(config)
+        manifest_hash = manager.stored_manifest_hash(key)
+        if manifest_hash is None:
+            raise TierError("cached region has no journaled manifest checksum")
+        manager.restore(key, expected_manifest_hash=manifest_hash)
+    elif state in ("LOCAL_ONLY", "UPLOADING", "CACHED"):
+        if not _regular_terrain(terrain):
+            raise TierError("tracked local terrain is missing; refusing to create an empty replacement")
+    else:
+        raise TierError("world-tier journal contains an unknown region state")
+
+    if not _regular_terrain(terrain):
+        raise TierError("region recovery completed without a regular local terrain file")
+    print("LOCAL")
+
+
+def _regular_terrain(path: Path) -> bool:
+    return not path.is_symlink() and path.is_file()
 
 
 def _make_manager(config: dict) -> TierManager:
@@ -370,6 +451,24 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--region-x", required=True, type=int)
     restore_parser.add_argument("--region-z", required=True, type=int)
     restore_parser.set_defaults(handler=restore)
+    region_state_parser = subparsers.add_parser(
+        "region-state", help="inspect the journal state for one region without changing it"
+    )
+    region_state_parser.add_argument("--config", required=True)
+    region_state_parser.add_argument("--dimension-key", required=True)
+    region_state_parser.add_argument("--dimension-root", required=True)
+    region_state_parser.add_argument("--region-x", required=True, type=int)
+    region_state_parser.add_argument("--region-z", required=True, type=int)
+    region_state_parser.set_defaults(handler=region_state)
+    recover_parser = subparsers.add_parser(
+        "recover-region", help="recover a missing or marked region from its durable journal state"
+    )
+    recover_parser.add_argument("--config", required=True)
+    recover_parser.add_argument("--dimension-key", required=True)
+    recover_parser.add_argument("--dimension-root", required=True)
+    recover_parser.add_argument("--region-x", required=True, type=int)
+    recover_parser.add_argument("--region-z", required=True, type=int)
+    recover_parser.set_defaults(handler=recover_if_remote)
     offload_parser = subparsers.add_parser(
         "offload", help="offload a region while Paper holds its exclusive lease"
     )
