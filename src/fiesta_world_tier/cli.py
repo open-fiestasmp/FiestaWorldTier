@@ -136,10 +136,10 @@ def recover_if_remote(args: argparse.Namespace) -> None:
         print("LOCAL" if _regular_terrain(terrain) else "UNTRACKED")
         return
 
-    manager = _make_manager(config)
     if state in ("EVICTING", "REMOTE_ONLY", "RESTORING"):
-        manager.recover(key)
+        _make_manager(config).recover(key)
     elif state == "CACHED" and not _regular_terrain(terrain):
+        manager = _make_manager(config)
         manifest_hash = manager.stored_manifest_hash(key)
         if manifest_hash is None:
             raise TierError("cached region has no journaled manifest checksum")

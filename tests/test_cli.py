@@ -13,7 +13,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fiesta_world_tier.cli import _dimension_config, _journal_region_state, _read_marker, main, recover_if_remote, region_state
+from fiesta_world_tier.cli import (
+    _dimension_config,
+    _journal_region_state,
+    _read_marker,
+    main,
+    recover_if_remote,
+    region_state,
+)
 from fiesta_world_tier.leases import FileRegionLease
 from fiesta_world_tier import RegionKey, TierError
 from fiesta_world_tier.openssh_store import TransientSSHError
@@ -145,7 +152,34 @@ class RestoreCliTests(unittest.TestCase):
         with patch("fiesta_world_tier.cli._make_manager") as make_manager:
             with self.assertRaisesRegex(TierError, "refusing to create an empty replacement"):
                 recover_if_remote(args)
-            make_manager.assert_called_once()
+            make_manager.assert_not_called()
+
+    def test_recovery_keeps_local_terrain_without_opening_remote_store(self):
+        journal = Path(self.temp.name) / "state.sqlite3"
+        with closing(sqlite3.connect(journal)) as db:
+            db.execute("CREATE TABLE regions (dimension TEXT, x INTEGER, z INTEGER, state TEXT)")
+            db.execute("INSERT INTO regions VALUES(?,?,?,?)", ("overworld", 3, 4, "LOCAL_ONLY"))
+            db.commit()
+        config_path = Path(self.temp.name) / "config.json"
+        config_path.write_text(json.dumps({
+            "server_root": str(self.server_root),
+            "journal": str(journal),
+            "dimensions": {"minecraft:overworld": "world"},
+        }), encoding="utf-8")
+        config_path.chmod(0o600)
+        args = type("Args", (), {
+            "config": str(config_path), "dimension_key": "minecraft:overworld",
+            "dimension_root": str(self.world), "region_x": 3, "region_z": 4,
+        })()
+        terrain = self.world / "region" / "r.3.4.mca"
+        terrain.parent.mkdir(parents=True)
+        terrain.write_bytes(b"local terrain")
+        output = io.StringIO()
+        with patch("fiesta_world_tier.cli._make_manager") as make_manager:
+            with redirect_stdout(output):
+                recover_if_remote(args)
+            make_manager.assert_not_called()
+        self.assertEqual(output.getvalue().strip(), "LOCAL")
 
     def test_recovery_allows_a_truly_untracked_region(self):
         journal = Path(self.temp.name) / "state.sqlite3"
