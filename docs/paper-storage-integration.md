@@ -200,3 +200,19 @@ The integration is intentionally fail-closed. If the marker, command,
 configuration, SSH host key, remote bundle, checksum, quota, or local disk
 reserve check fails, the operation returns an I/O error and leaves the world
 files untouched. Keep a separate complete backup before any production rollout.
+
+### Filesystem-full restore check
+
+On 2026-11-25, a disposable 64 MiB `tmpfs` held the local world and a
+four-member 19 MiB region bundle. The object store and recovery journal were
+outside the test filesystem. A test-only store filled the `tmpfs` after the
+restore's free-space preflight, so the actual staged fetch hit `ENOSPC`.
+Restore left the region in `RESTORING`, retained its remote object, published
+no local terrain, and removed the partial stage. After the filler was deleted,
+recovery restored all four files with matching SHA-256 hashes and cleared the
+marker and remote object. The 102-test Python suite passed in the same checkout.
+
+This exercises a real local filesystem exhaustion race against the directory
+object store. It does not test Luna's shared filesystem or host quotas, SFTP,
+Paper's chunk callback, or a connected player. Production eviction remains
+disabled.
