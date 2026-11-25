@@ -239,7 +239,16 @@ fiesta-world-tier catalog --config /etc/fiesta-world-tier/config.json
 fiesta-world-tier candidates --config /etc/fiesta-world-tier/config.json
 fiesta-world-tier plan --config /etc/fiesta-world-tier/config.json
 fiesta-world-tier storage --config /etc/fiesta-world-tier/config.json
+fiesta-world-tier region-state --config /etc/fiesta-world-tier/config.json --dimension-key minecraft:overworld --dimension-root /srv/fiesta/world --region-x 0 --region-z 0
+fiesta-world-tier recover-region --config /etc/fiesta-world-tier/config.json --dimension-key minecraft:overworld --dimension-root /srv/fiesta/world --region-x 0 --region-z 0
 ```
+
+Paper's optional journal lookup uses `region-state` before treating a missing
+region as new. It reports `REMOTE`, `TRACKED_MISSING`, `LOCAL`, or `UNTRACKED`.
+`recover-region` restores journaled remote state, rejects missing terrain that
+the journal records as local, and leaves truly untracked regions available for
+normal generation. Enable the Paper lookup property before the first offload.
+The journal must remain available and backed up with the world-tier config.
 
 The budget planner selects oldest cold local bundles until the configured
 `local_world_data_budget_bytes` is approached. It reports selected bundle

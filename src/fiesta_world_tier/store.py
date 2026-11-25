@@ -402,12 +402,16 @@ class TierManager:
             db.close()
 
     def state(self, key: RegionKey) -> str:
+        state = self.region_state(key)
+        return state if state is not None else "LOCAL_ONLY"
+
+    def region_state(self, key: RegionKey) -> str | None:
         with self._db() as db:
             row = db.execute(
                 "SELECT state FROM regions WHERE dimension=? AND x=? AND z=?",
                 (key.dimension, key.x, key.z),
             ).fetchone()
-        return row[0] if row else "LOCAL_ONLY"
+        return row[0] if row else None
 
     def last_access(self, key: RegionKey) -> float | None:
         marker_timestamp = self._read_access_marker(key)
@@ -1222,6 +1226,9 @@ class TierManager:
                 (key.dimension, key.x, key.z),
             ).fetchone()
         return row[0] if row else None
+
+    def stored_manifest_hash(self, key: RegionKey) -> str | None:
+        return self._stored_manifest_hash(key)
 
     def recover(self, key: RegionKey) -> None:
         state = self.state(key)
