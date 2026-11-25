@@ -296,10 +296,6 @@ def restore(args: argparse.Namespace) -> None:
     _make_manager(config).restore(key, expected_manifest_hash=expected_hash)
 
 
-def recover_region(args: argparse.Namespace) -> None:
-    recover_if_remote(args)
-
-
 def catalog(args: argparse.Namespace) -> None:
     config = _private_json(Path(args.config).absolute())
     trust_atime = args.trust_atime or _trust_filesystem_atime(config)
@@ -472,7 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser.add_argument("--dimension-root", required=True)
     recover_parser.add_argument("--region-x", required=True, type=int)
     recover_parser.add_argument("--region-z", required=True, type=int)
-    recover_parser.set_defaults(handler=recover_region)
+    recover_parser.set_defaults(handler=recover_if_remote)
     offload_parser = subparsers.add_parser(
         "offload", help="offload a region while Paper holds its exclusive lease"
     )
