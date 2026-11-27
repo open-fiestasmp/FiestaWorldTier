@@ -949,6 +949,24 @@ class OpenSSHStoreTests(unittest.TestCase):
             store.publish(self.key, self.create_bundle())
         self.assertFalse(store._exists(store._object_path(self.key)))
 
+    def test_staging_usage_counts_toward_remote_quota(self):
+        config = OpenSSHConfig(**{**self.config.__dict__, "max_bytes": 1_000_000})
+        transport = FakeOpenSSH(self.root / "staging-quota-remote")
+        store = OpenSSHObjectStore(config, transport)
+        files = self.create_bundle()
+        store._ensure_root()
+
+        staged_file = transport.path(str(store.staging / "interrupted-upload" / "region.mca"))
+        staged_file.parent.mkdir(parents=True)
+        staged_file.write_bytes(b"x" * (config.max_bytes - 1))
+
+        with self.assertRaisesRegex(TierError, "quota"):
+            store.publish(self.key, files)
+
+        self.assertEqual(staged_file.stat().st_size, config.max_bytes - 1)
+        self.assertFalse(store._exists(store._object_path(self.key)))
+        self.assertTrue(all(path.is_file() for path in files.values()))
+
     def test_free_space_reserve_rejection_leaves_local_bundle_and_no_remote_object(self):
         config = OpenSSHConfig(**{**self.config.__dict__, "minimum_free_bytes": 1_000_000})
         transport = FakeOpenSSH(self.root / "reserve-remote")
