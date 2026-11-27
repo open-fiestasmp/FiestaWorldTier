@@ -10,7 +10,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
@@ -323,6 +325,31 @@ class DisconnectingOpenSSH(FakeOpenSSH):
             raise TransientSSHError(
                 "simulated SSH disconnect after partial stream", retryable=self.retryable
             )
+
+
+class BlockingPublishOpenSSH(FakeOpenSSH):
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.block_upload = False
+        self.upload_started = threading.Event()
+        self.release_upload = threading.Event()
+        self.lock_contended = threading.Event()
+
+    def run_ssh(self, command: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        prefix = "umask 077 && mkdir -- "
+        if command.startswith(prefix):
+            lock = shlex.split(command[len(prefix):])[0]
+            if self.path(lock).is_dir():
+                self.lock_contended.set()
+        return super().run_ssh(command, check=check)
+
+    def run_sftp(self, batch: str) -> subprocess.CompletedProcess[str]:
+        if self.block_upload and batch.startswith("mkdir ") and ".staging/" in batch:
+            self.block_upload = False
+            self.upload_started.set()
+            if not self.release_upload.wait(timeout=5):
+                raise TimeoutError("test did not release blocked publish")
+        return super().run_sftp(batch)
 
 
 class OpenSSHStoreTests(unittest.TestCase):
@@ -966,6 +993,65 @@ class OpenSSHStoreTests(unittest.TestCase):
         self.assertEqual(staged_file.stat().st_size, config.max_bytes - 1)
         self.assertFalse(store._exists(store._object_path(self.key)))
         self.assertTrue(all(path.is_file() for path in files.values()))
+
+    def test_concurrent_publishers_serialize_remote_quota_checks(self):
+        transport = BlockingPublishOpenSSH(self.root / "concurrent-quota-remote")
+        base_store = OpenSSHObjectStore(self.config, transport)
+        base_files = self.create_bundle()
+        base_store.publish(self.key, base_files)
+        base_usage = base_store.usage()
+
+        config = OpenSSHConfig(**{**self.config.__dict__, "max_bytes": base_usage * 2})
+        stores = [OpenSSHObjectStore(config, transport), OpenSSHObjectStore(config, transport)]
+        keys = [RegionKey("overworld", -2, 6), RegionKey("overworld", -2, 7)]
+        bundles = []
+        for key in keys:
+            files = {}
+            for member, source in base_files.items():
+                updated = member.replace("r.-2.5", f"r.{key.x}.{key.z}")
+                updated = updated.replace("c.-64.160", f"c.{key.x * 32}.{key.z * 32}")
+                destination = self.root / f"source-{key.z}" / updated
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                files[updated] = destination
+            bundles.append(files)
+
+        start = threading.Barrier(2)
+
+        def publish(store, key, files):
+            start.wait(timeout=3)
+            return store.publish(key, files)
+
+        transport.block_upload = True
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(publish, store, key, files)
+                for store, key, files in zip(stores, keys, bundles)
+            ]
+            try:
+                self.assertTrue(transport.upload_started.wait(timeout=3))
+                self.assertTrue(transport.lock_contended.wait(timeout=3))
+            finally:
+                transport.release_upload.set()
+
+            successes = []
+            failures = []
+            for key, future in zip(keys, futures):
+                try:
+                    future.result(timeout=10)
+                    successes.append(key)
+                except TierError as exc:
+                    failures.append(exc)
+
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("quota", str(failures[0]))
+        self.assertTrue(all(path.is_file() for files in bundles for path in files.values()))
+        self.assertFalse(transport.path(str(base_store.lock_path)).exists())
+        self.assertEqual(list(transport.path(str(base_store.staging)).iterdir()), [])
+        self.assertEqual(base_store.usage(), config.max_bytes)
+        for key in keys:
+            self.assertEqual(base_store.object_exists(key), key in successes)
 
     def test_free_space_reserve_rejection_leaves_local_bundle_and_no_remote_object(self):
         config = OpenSSHConfig(**{**self.config.__dict__, "minimum_free_bytes": 1_000_000})
